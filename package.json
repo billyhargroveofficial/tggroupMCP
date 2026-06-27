@@ -7,13 +7,15 @@
   "bin": {
     "telegram-parilka-mcp": "./dist/index.js",
     "telegram-parilka-mcp-generate-session": "./dist/generate-session.js",
-    "telegram-parilka-mcp-sync-daemon": "./dist/sync-daemon.js"
+    "telegram-parilka-mcp-sync-daemon": "./dist/sync-daemon.js",
+    "telegram-parilka-mcp-embed-index": "./dist/embed-index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/index.ts",
     "generate-session": "tsx src/generate-session.ts",
+    "embed-once": "tsx src/embed-index.ts",
     "print-config": "tsx src/index.ts --print-config",
     "sync-once": "tsx src/sync-daemon.ts --once",
     "sync-daemon": "tsx src/sync-daemon.ts",

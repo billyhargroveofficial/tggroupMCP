@@ -56,6 +56,26 @@ systemctl --user status telegram-parilka-mcp-sync.service
 journalctl --user -u telegram-parilka-mcp-sync.service -n 100 --no-pager
 ```
 
+## Vector RAG
+
+Configure an OpenAI-compatible embeddings endpoint:
+
+```bash
+OPENAI_API_KEY=...
+TELEGRAM_EMBEDDINGS_ENABLED=true
+TELEGRAM_EMBEDDINGS_MODEL=text-embedding-3-small
+TELEGRAM_EMBEDDINGS_DIMENSIONS=256
+```
+
+Index a bounded batch of cached messages:
+
+```bash
+cd /root/telegram-parilka-mcp
+npm run embed-once -- --limit-chunks 1000
+```
+
+Search with `search_messages` for keyword/vector/hybrid results, or `semantic_search_messages` for vector-only chunks.
+
 ## Codex Config
 
 ```toml

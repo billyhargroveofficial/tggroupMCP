@@ -1,4 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import type { EmbeddingChunkVector } from "./embeddings.js";
 import type { ChatInfo } from "./telegram-client.js";
 
 export type StoredMessage = {
@@ -24,6 +25,25 @@ export type SyncState = {
   lastBackfillAt?: string;
   lastError?: string;
   updatedAt?: string;
+};
+
+export type KeywordSearchHit = {
+  message: StoredMessage;
+  rank: number;
+};
+
+export type StoredEmbeddingChunk = {
+  id: number;
+  chatId: string;
+  startMessageId: number;
+  endMessageId: number;
+  messageCount: number;
+  text: string;
+  model: string;
+  dimensions: number;
+  embedding: Uint8Array;
+  contentHash: string;
+  updatedAt: string;
 };
 
 export class MessageStore {
@@ -131,6 +151,10 @@ export class MessageStore {
   }
 
   search(params: { chatId: string; query: string; limit: number; beforeId?: number; afterId?: number }): StoredMessage[] {
+    return this.searchWithRank(params).map((hit) => hit.message);
+  }
+
+  searchWithRank(params: { chatId: string; query: string; limit: number; beforeId?: number; afterId?: number }): KeywordSearchHit[] {
     const clauses = ["m.chat_id = ?", "messages_fts MATCH ?"];
     const values: unknown[] = [params.chatId, escapeFtsQuery(params.query)];
     if (params.beforeId != null) {
@@ -144,15 +168,18 @@ export class MessageStore {
     values.push(params.limit);
     const rows = this.db
       .prepare(
-        `SELECT m.*
+        `SELECT m.*, bm25(messages_fts) AS fts_rank
          FROM messages_fts
          JOIN messages m ON m.id = messages_fts.rowid
          WHERE ${clauses.join(" AND ")}
-         ORDER BY m.message_id DESC
+         ORDER BY fts_rank ASC, m.message_id DESC
          LIMIT ?`,
       )
       .all(...toSqlValues(values)) as Record<string, unknown>[];
-    return rows.map(rowToStoredMessage);
+    return rows.map((row) => ({
+      message: rowToStoredMessage(row),
+      rank: Number(row.fts_rank ?? 0),
+    }));
   }
 
   getThreadContext(params: { chatId: string; messageId: number; before: number; after: number }): StoredMessage[] {
@@ -165,6 +192,38 @@ export class MessageStore {
          ORDER BY message_id ASC`,
       )
       .all(params.chatId, min, max) as Record<string, unknown>[];
+    return rows.map(rowToStoredMessage);
+  }
+
+  getMessagesForEmbedding(params: { chatId: string; afterId?: number; limit: number }): StoredMessage[] {
+    const clauses = ["chat_id = ?", "length(trim(text)) > 0"];
+    const values: unknown[] = [params.chatId];
+    if (params.afterId != null) {
+      clauses.push("message_id > ?");
+      values.push(params.afterId);
+    }
+    values.push(params.limit);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY message_id ASC
+         LIMIT ?`,
+      )
+      .all(...toSqlValues(values)) as Record<string, unknown>[];
+    return rows.map(rowToStoredMessage);
+  }
+
+  getMessagesInRange(params: { chatId: string; startMessageId: number; endMessageId: number; limit?: number }): StoredMessage[] {
+    const limit = params.limit ?? 100;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE chat_id = ? AND message_id BETWEEN ? AND ?
+         ORDER BY message_id ASC
+         LIMIT ?`,
+      )
+      .all(params.chatId, params.startMessageId, params.endMessageId, limit) as Record<string, unknown>[];
     return rows.map(rowToStoredMessage);
   }
 
@@ -241,6 +300,125 @@ export class MessageStore {
     return Number(row?.count ?? 0);
   }
 
+  getEmbeddingCursor(params: { chatId: string; model: string; dimensions?: number }): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(end_message_id) AS cursor
+         FROM message_embedding_chunks
+         WHERE chat_id = ? AND embedding_model = ? AND (? IS NULL OR embedding_dimensions = ?)`,
+      )
+      .get(params.chatId, params.model, params.dimensions ?? null, params.dimensions ?? null) as
+      | Record<string, unknown>
+      | undefined;
+    return row?.cursor == null ? undefined : Number(row.cursor);
+  }
+
+  upsertEmbeddingChunks(chunks: EmbeddingChunkVector[]): number {
+    if (chunks.length === 0) {
+      return 0;
+    }
+    const stmt = this.db.prepare(
+      `INSERT INTO message_embedding_chunks (
+         chat_id, start_message_id, end_message_id, message_count, text,
+         embedding_model, embedding_dimensions, embedding, content_hash, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(chat_id, start_message_id, end_message_id, embedding_model, embedding_dimensions)
+       DO UPDATE SET
+         message_count = excluded.message_count,
+         text = excluded.text,
+         embedding = excluded.embedding,
+         content_hash = excluded.content_hash,
+         updated_at = excluded.updated_at`,
+    );
+    this.db.exec("BEGIN");
+    try {
+      for (const chunk of chunks) {
+        stmt.run(
+          chunk.chatId,
+          chunk.startMessageId,
+          chunk.endMessageId,
+          chunk.messageCount,
+          chunk.text,
+          chunk.model,
+          chunk.dimensions,
+          chunk.embedding,
+          chunk.contentHash,
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return chunks.length;
+  }
+
+  deleteEmbeddingChunks(params: { chatId: string; model?: string; dimensions?: number }): number {
+    const clauses = ["chat_id = ?"];
+    const values: unknown[] = [params.chatId];
+    if (params.model != null) {
+      clauses.push("embedding_model = ?");
+      values.push(params.model);
+    }
+    if (params.dimensions != null) {
+      clauses.push("embedding_dimensions = ?");
+      values.push(params.dimensions);
+    }
+    const result = this.db.prepare(`DELETE FROM message_embedding_chunks WHERE ${clauses.join(" AND ")}`).run(...toSqlValues(values));
+    return Number(result.changes ?? 0);
+  }
+
+  getEmbeddingChunks(params: {
+    chatId: string;
+    model: string;
+    dimensions?: number;
+    beforeId?: number;
+    afterId?: number;
+  }): StoredEmbeddingChunk[] {
+    const clauses = ["chat_id = ?", "embedding_model = ?"];
+    const values: unknown[] = [params.chatId, params.model];
+    if (params.dimensions != null) {
+      clauses.push("embedding_dimensions = ?");
+      values.push(params.dimensions);
+    }
+    if (params.beforeId != null) {
+      clauses.push("start_message_id < ?");
+      values.push(params.beforeId);
+    }
+    if (params.afterId != null) {
+      clauses.push("end_message_id > ?");
+      values.push(params.afterId);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM message_embedding_chunks
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY start_message_id ASC`,
+      )
+      .all(...toSqlValues(values)) as Record<string, unknown>[];
+    return rows.map(rowToEmbeddingChunk);
+  }
+
+  getEmbeddingStats(chatId: string): Array<Record<string, unknown>> {
+    return this.db
+      .prepare(
+        `SELECT
+           embedding_model AS model,
+           embedding_dimensions AS dimensions,
+           COUNT(*) AS chunks,
+           MIN(start_message_id) AS oldest_message_id,
+           MAX(end_message_id) AS newest_message_id,
+           SUM(message_count) AS indexed_messages,
+           MAX(updated_at) AS updated_at
+         FROM message_embedding_chunks
+         WHERE chat_id = ?
+         GROUP BY embedding_model, embedding_dimensions
+         ORDER BY updated_at DESC`,
+      )
+      .all(chatId) as Record<string, unknown>[];
+  }
+
   startHistoryJob(chatId: string, direction: "recent" | "backfill" | "manual", targetCount: number): string {
     const jobId = `hist_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     this.db
@@ -276,7 +454,7 @@ export class MessageStore {
     const syncState =
       (this.db.prepare("SELECT * FROM sync_state WHERE chat_id = ?").get(chatId) as Record<string, unknown> | undefined) ??
       {};
-    return { ...messageStats, syncState };
+    return { ...messageStats, syncState, embeddings: this.getEmbeddingStats(chatId) };
   }
 
   private migrate(): void {
@@ -331,6 +509,21 @@ export class MessageStore {
         error TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS message_embedding_chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL,
+        start_message_id INTEGER NOT NULL,
+        end_message_id INTEGER NOT NULL,
+        message_count INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        embedding_model TEXT NOT NULL,
+        embedding_dimensions INTEGER NOT NULL,
+        embedding BLOB NOT NULL,
+        content_hash TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(chat_id, start_message_id, end_message_id, embedding_model, embedding_dimensions)
+      );
+
       CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
         text,
         sender_name,
@@ -357,6 +550,10 @@ export class MessageStore {
 
       CREATE INDEX IF NOT EXISTS idx_messages_chat_message_id ON messages(chat_id, message_id);
       CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(chat_id, sender_id);
+      CREATE INDEX IF NOT EXISTS idx_embedding_chunks_lookup
+        ON message_embedding_chunks(chat_id, embedding_model, embedding_dimensions);
+      CREATE INDEX IF NOT EXISTS idx_embedding_chunks_range
+        ON message_embedding_chunks(chat_id, start_message_id, end_message_id);
     `);
     this.ensureColumn("sync_state", "next_backfill_offset_id", "INTEGER");
     this.ensureColumn("sync_state", "last_recent_sync_at", "TEXT");
@@ -441,6 +638,22 @@ function rowToSyncState(row: Record<string, unknown>): SyncState {
     lastBackfillAt: row.last_backfill_at == null ? undefined : String(row.last_backfill_at),
     lastError: row.last_error == null ? undefined : String(row.last_error),
     updatedAt: row.updated_at == null ? undefined : String(row.updated_at),
+  };
+}
+
+function rowToEmbeddingChunk(row: Record<string, unknown>): StoredEmbeddingChunk {
+  return {
+    id: Number(row.id),
+    chatId: String(row.chat_id),
+    startMessageId: Number(row.start_message_id),
+    endMessageId: Number(row.end_message_id),
+    messageCount: Number(row.message_count),
+    text: String(row.text ?? ""),
+    model: String(row.embedding_model),
+    dimensions: Number(row.embedding_dimensions),
+    embedding: row.embedding as Uint8Array,
+    contentHash: String(row.content_hash),
+    updatedAt: String(row.updated_at),
   };
 }
 

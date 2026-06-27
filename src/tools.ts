@@ -6,6 +6,7 @@ import { MessageStore } from "./store.js";
 import { type ChatInfo, TelegramService } from "./telegram-client.js";
 import { SendThrottler } from "./throttler.js";
 import { HistorySyncer } from "./sync-engine.js";
+import { VectorRag } from "./vector-rag.js";
 
 type ToolDef = {
   name: string;
@@ -25,6 +26,7 @@ const jsonTool = (payload: unknown): ToolContent => ({
 export class TelegramTools {
   private readonly throttler: SendThrottler;
   private readonly syncer: HistorySyncer;
+  private readonly vectorRag: VectorRag;
 
   constructor(
     private readonly config: AppConfig,
@@ -33,6 +35,7 @@ export class TelegramTools {
   ) {
     this.throttler = new SendThrottler(config);
     this.syncer = new HistorySyncer(config, telegram, store);
+    this.vectorRag = new VectorRag(config, store);
   }
 
   listTools(): ToolDef[] {
@@ -82,14 +85,39 @@ export class TelegramTools {
       },
       {
         name: "search_messages",
-        description: "Search cached Telegram messages with SQLite FTS.",
+        description: "Search cached Telegram messages with keyword FTS, vector cosine search, and hybrid candidates.",
         inputSchema: objectSchema({
           chat: stringProp("Chat ID, @username, or omitted for TELEGRAM_DEFAULT_CHAT_ID."),
           query: stringProp("Search query."),
-          limit: numberProp("Messages to return.", 1, 200),
+          limit: numberProp("Candidates per search channel.", 1, 200),
+          keyword_limit: numberProp("Keyword FTS candidates to return.", 1, 200),
+          vector_limit: numberProp("Vector chunks to return.", 1, 50),
+          hybrid_limit: numberProp("Hybrid candidates to return.", 1, 100),
           before_id: numberProp("Only messages older than this message ID.", 1),
           after_id: numberProp("Only messages newer than this message ID.", 1),
         }, ["query"]),
+      },
+      {
+        name: "semantic_search_messages",
+        description: "Vector/cosine search over indexed cached Telegram message chunks.",
+        inputSchema: objectSchema({
+          chat: stringProp("Chat ID, @username, or omitted for TELEGRAM_DEFAULT_CHAT_ID."),
+          query: stringProp("Semantic search query."),
+          limit: numberProp("Vector chunks to return.", 1, 50),
+          before_id: numberProp("Only chunks older than this message ID.", 1),
+          after_id: numberProp("Only chunks newer than this message ID.", 1),
+          include_messages: boolProp("Include source messages for each returned chunk."),
+        }, ["query"]),
+      },
+      {
+        name: "index_embeddings",
+        description: "Index cached Telegram messages into vector chunks for semantic search.",
+        inputSchema: objectSchema({
+          chat: stringProp("Chat ID, @username, or omitted for TELEGRAM_DEFAULT_CHAT_ID."),
+          limit_chunks: numberProp("Chunks to embed in this run.", 1, 5000),
+          after_message_id: numberProp("Start indexing messages after this ID.", 0),
+          rebuild: boolProp("Delete existing chunks for the configured model/dimensions before indexing."),
+        }),
       },
       {
         name: "get_thread_context",
@@ -157,6 +185,10 @@ export class TelegramTools {
           return jsonTool(await this.readHistory(rawArgs));
         case "search_messages":
           return jsonTool(await this.searchMessages(rawArgs));
+        case "semantic_search_messages":
+          return jsonTool(await this.semanticSearchMessages(rawArgs));
+        case "index_embeddings":
+          return jsonTool(await this.indexEmbeddings(rawArgs));
         case "get_thread_context":
           return jsonTool(await this.getThreadContext(rawArgs));
         case "preview_message":
@@ -182,6 +214,16 @@ export class TelegramTools {
       dbPath: this.config.storage.dbPath,
       isTelegramConfigured: this.telegram.isConfigured,
       sync: this.config.sync,
+      embeddings: {
+        enabled: this.config.embeddings.enabled,
+        configured: Boolean(this.config.embeddings.apiKey),
+        baseUrl: this.config.embeddings.baseUrl,
+        model: this.config.embeddings.model,
+        dimensions: this.config.embeddings.dimensions,
+        chunkMessages: this.config.embeddings.chunkMessages,
+        chunkMaxChars: this.config.embeddings.chunkMaxChars,
+        tickChunkLimit: this.config.embeddings.tickChunkLimit,
+      },
       throttle: this.config.throttle,
     };
   }
@@ -257,19 +299,96 @@ export class TelegramTools {
       .extend({
         query: z.string().min(1),
         limit: limitSchema.max(200).default(30),
+        keyword_limit: limitSchema.max(200).optional(),
+        vector_limit: limitSchema.max(50).optional(),
+        hybrid_limit: limitSchema.max(100).optional(),
         before_id: z.number().int().positive().optional(),
         after_id: z.number().int().positive().optional(),
       })
       .parse(rawArgs ?? {});
     const chat = this.cacheChat(args.chat);
+    const keywordLimit = args.keyword_limit ?? args.limit;
+    const vectorLimit = args.vector_limit ?? Math.min(args.limit, this.config.embeddings.searchLimit);
+    const hybridLimit = args.hybrid_limit ?? args.limit;
+    const keywordHits = this.store.searchWithRank({
+      chatId: chat.chatId,
+      query: args.query,
+      limit: keywordLimit,
+      beforeId: args.before_id,
+      afterId: args.after_id,
+    });
+    const vector = await this.vectorRag
+      .search({
+        chatId: chat.chatId,
+        query: args.query,
+        limit: vectorLimit,
+        beforeId: args.before_id,
+        afterId: args.after_id,
+        includeMessages: true,
+      })
+      .catch((error) => ({
+        available: false,
+        error: error instanceof Error ? error.message : String(error),
+        stats: this.store.getEmbeddingStats(chat.chatId),
+        hits: [],
+      }));
     return ok({
       chat,
-      messages: this.store.search({
+      query: args.query,
+      messages: keywordHits.map((hit) => hit.message),
+      keyword: {
+        count: keywordHits.length,
+        hits: keywordHits,
+      },
+      vector,
+      hybrid: {
+        count: Math.min(hybridLimit, keywordHits.length + vector.hits.length),
+        hits: this.vectorRag.hybrid(keywordHits, vector.hits, hybridLimit),
+      },
+    });
+  }
+
+  private async semanticSearchMessages(rawArgs: unknown): Promise<Record<string, unknown>> {
+    const args = chatSchema
+      .extend({
+        query: z.string().min(1),
+        limit: limitSchema.max(50).default(this.config.embeddings.searchLimit),
+        before_id: z.number().int().positive().optional(),
+        after_id: z.number().int().positive().optional(),
+        include_messages: z.boolean().default(true),
+      })
+      .parse(rawArgs ?? {});
+    const chat = this.cacheChat(args.chat);
+    return ok({
+      chat,
+      query: args.query,
+      vector: await this.vectorRag.search({
         chatId: chat.chatId,
         query: args.query,
         limit: args.limit,
         beforeId: args.before_id,
         afterId: args.after_id,
+        includeMessages: args.include_messages,
+      }),
+    });
+  }
+
+  private async indexEmbeddings(rawArgs: unknown): Promise<Record<string, unknown>> {
+    const args = chatSchema
+      .extend({
+        limit_chunks: limitSchema.max(5000).default(this.config.embeddings.tickChunkLimit),
+        after_message_id: z.number().int().nonnegative().optional(),
+        rebuild: z.boolean().default(false),
+      })
+      .parse(rawArgs ?? {});
+    const chat = this.cacheChat(args.chat);
+    return ok({
+      chat,
+      result: await this.vectorRag.indexCachedMessages({
+        chatId: chat.chatId,
+        limitChunks: args.limit_chunks,
+        afterMessageId: args.after_message_id,
+        rebuild: args.rebuild,
       }),
     });
   }

@@ -37,6 +37,16 @@ One-shot mode, useful for cron/systemd timers:
 npm run sync-once
 ```
 
+## Vector RAG
+
+Set `OPENAI_API_KEY` or `TELEGRAM_EMBEDDINGS_API_KEY`, then index cached messages into local SQLite vector chunks:
+
+```bash
+npm run embed-once -- --limit-chunks 1000
+```
+
+The regular sync daemon also indexes new chunks when embeddings are configured. `search_messages` returns keyword, vector, and hybrid candidates; `semantic_search_messages` returns only cosine-ranked chunks.
+
 MCP config example:
 
 ```toml

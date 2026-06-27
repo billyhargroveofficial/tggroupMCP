@@ -9,7 +9,9 @@ Default chat: `-1003179772905` (`Парилка228`). All tools accept optional 
 - `get_chat_info`: resolve chat and return local SQLite cache stats.
 - `sync_history`: backfill history into SQLite. Use bounded pages; the server returns metadata, not a huge message dump.
 - `read_history`: read cached messages by `limit`, `before_id`, `after_id`, and order.
-- `search_messages`: SQLite FTS search over cached text.
+- `search_messages`: multi-channel cached search; returns keyword FTS hits, vector/cosine chunks when indexed, and hybrid candidates.
+- `semantic_search_messages`: vector/cosine search over indexed cached message chunks.
+- `index_embeddings`: build local SQLite vector chunks from cached messages via the configured embeddings API.
 - `get_thread_context`: cached messages around a message ID.
 
 ## Write Tools
