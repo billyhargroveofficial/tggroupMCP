@@ -1,0 +1,34 @@
+{
+  "name": "telegram-parilka-mcp",
+  "version": "0.1.0",
+  "description": "TypeScript MCP server for reading and replying in a Telegram group through MTProto.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "telegram-parilka-mcp": "./dist/index.js",
+    "telegram-parilka-mcp-generate-session": "./dist/generate-session.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/index.ts",
+    "generate-session": "tsx src/generate-session.ts",
+    "print-config": "tsx src/index.ts --print-config",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.4.2",
+    "input": "^1.0.1",
+    "telegram": "^2.26.22",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

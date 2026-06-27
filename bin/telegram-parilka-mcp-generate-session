@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /root/telegram-parilka-mcp
+if [[ -f /root/telegram-parilka-mcp/.env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /root/telegram-parilka-mcp/.env
+  set +a
+fi
+exec node /root/telegram-parilka-mcp/dist/generate-session.js "$@"

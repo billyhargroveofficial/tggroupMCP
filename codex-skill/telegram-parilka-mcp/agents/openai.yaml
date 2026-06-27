@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telegram Parilka MCP"
+  short_description: "Use the Telegram Parilka MCP safely"
+  default_prompt: "Use $telegram-parilka-mcp to read Parilka context and draft a safe Telegram reply."
