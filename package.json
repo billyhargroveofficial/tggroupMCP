@@ -6,7 +6,8 @@
   "private": true,
   "bin": {
     "telegram-parilka-mcp": "./dist/index.js",
-    "telegram-parilka-mcp-generate-session": "./dist/generate-session.js"
+    "telegram-parilka-mcp-generate-session": "./dist/generate-session.js",
+    "telegram-parilka-mcp-sync-daemon": "./dist/sync-daemon.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -14,6 +15,8 @@
     "dev": "tsx src/index.ts",
     "generate-session": "tsx src/generate-session.ts",
     "print-config": "tsx src/index.ts --print-config",
+    "sync-once": "tsx src/sync-daemon.ts --once",
+    "sync-daemon": "tsx src/sync-daemon.ts",
     "start": "node dist/index.js"
   },
   "dependencies": {

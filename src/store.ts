@@ -14,6 +14,18 @@ export type StoredMessage = {
   rawJson?: string;
 };
 
+export type SyncState = {
+  chatId: string;
+  oldestMessageId?: number;
+  newestMessageId?: number;
+  nextBackfillOffsetId?: number;
+  syncedCount: number;
+  lastRecentSyncAt?: string;
+  lastBackfillAt?: string;
+  lastError?: string;
+  updatedAt?: string;
+};
+
 export class MessageStore {
   private readonly db: DatabaseSync;
 
@@ -77,7 +89,15 @@ export class MessageStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    return messages.length;
+    return new Set(messages.map((message) => `${message.chatId}:${message.messageId}`)).size;
+  }
+
+  getCachedChat(chatId: string): ChatInfo | undefined {
+    const row = this.db.prepare("SELECT * FROM chats WHERE chat_id = ?").get(chatId) as Record<string, unknown> | undefined;
+    if (!row) {
+      return undefined;
+    }
+    return rowToChatInfo(row);
   }
 
   getHistory(params: {
@@ -148,19 +168,102 @@ export class MessageStore {
     return rows.map(rowToStoredMessage);
   }
 
-  updateSyncState(chat: ChatInfo, state: { oldestMessageId?: number; newestMessageId?: number; syncedCount: number }): void {
+  updateSyncState(
+    chat: ChatInfo,
+    state: {
+      oldestMessageId?: number;
+      newestMessageId?: number;
+      nextBackfillOffsetId?: number;
+      syncedCount: number;
+      mode?: "recent" | "backfill" | "manual";
+      error?: string | null;
+    },
+  ): void {
     this.upsertChat(chat);
     this.db
       .prepare(
-        `INSERT INTO sync_state (chat_id, oldest_message_id, newest_message_id, synced_count, updated_at)
-         VALUES (?, ?, ?, ?, datetime('now'))
+        `INSERT INTO sync_state (
+           chat_id, oldest_message_id, newest_message_id, next_backfill_offset_id,
+           synced_count, last_recent_sync_at, last_backfill_at, last_error, updated_at
+         )
+         VALUES (
+           ?, ?, ?, ?, ?,
+           CASE WHEN ? = 'recent' THEN datetime('now') ELSE NULL END,
+           CASE WHEN ? = 'backfill' THEN datetime('now') ELSE NULL END,
+           ?, datetime('now')
+         )
          ON CONFLICT(chat_id) DO UPDATE SET
-           oldest_message_id = COALESCE(excluded.oldest_message_id, sync_state.oldest_message_id),
-           newest_message_id = COALESCE(excluded.newest_message_id, sync_state.newest_message_id),
-           synced_count = sync_state.synced_count + excluded.synced_count,
+           oldest_message_id = CASE
+             WHEN excluded.oldest_message_id IS NULL THEN sync_state.oldest_message_id
+             WHEN sync_state.oldest_message_id IS NULL THEN excluded.oldest_message_id
+             WHEN excluded.oldest_message_id < sync_state.oldest_message_id THEN excluded.oldest_message_id
+             ELSE sync_state.oldest_message_id
+           END,
+           newest_message_id = CASE
+             WHEN excluded.newest_message_id IS NULL THEN sync_state.newest_message_id
+             WHEN sync_state.newest_message_id IS NULL THEN excluded.newest_message_id
+             WHEN excluded.newest_message_id > sync_state.newest_message_id THEN excluded.newest_message_id
+             ELSE sync_state.newest_message_id
+           END,
+           next_backfill_offset_id = COALESCE(excluded.next_backfill_offset_id, sync_state.next_backfill_offset_id),
+           synced_count = excluded.synced_count,
+           last_recent_sync_at = COALESCE(excluded.last_recent_sync_at, sync_state.last_recent_sync_at),
+           last_backfill_at = COALESCE(excluded.last_backfill_at, sync_state.last_backfill_at),
+           last_error = excluded.last_error,
            updated_at = excluded.updated_at`,
       )
-      .run(chat.chatId, state.oldestMessageId ?? null, state.newestMessageId ?? null, state.syncedCount);
+      .run(
+        chat.chatId,
+        state.oldestMessageId ?? null,
+        state.newestMessageId ?? null,
+        state.nextBackfillOffsetId ?? null,
+        state.syncedCount,
+        state.mode ?? "manual",
+        state.mode ?? "manual",
+        state.error ?? null,
+      );
+  }
+
+  getSyncState(chatId: string): SyncState | undefined {
+    const row = this.db.prepare("SELECT * FROM sync_state WHERE chat_id = ?").get(chatId) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) {
+      return undefined;
+    }
+    return rowToSyncState(row);
+  }
+
+  countMessages(chatId: string): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM messages WHERE chat_id = ?").get(chatId) as
+      | Record<string, unknown>
+      | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  startHistoryJob(chatId: string, direction: "recent" | "backfill" | "manual", targetCount: number): string {
+    const jobId = `hist_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    this.db
+      .prepare(
+        `INSERT INTO history_jobs (job_id, chat_id, direction, status, target_count, started_at)
+         VALUES (?, ?, ?, 'running', ?, datetime('now'))`,
+      )
+      .run(jobId, chatId, direction, targetCount);
+    return jobId;
+  }
+
+  finishHistoryJob(
+    jobId: string,
+    result: { status: "done" | "failed"; batches: number; messagesSeen: number; messagesUpserted: number; error?: string },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE history_jobs
+         SET status = ?, finished_at = datetime('now'), batches = ?, messages_seen = ?,
+             messages_upserted = ?, error = ?
+         WHERE job_id = ?`,
+      )
+      .run(result.status, result.batches, result.messagesSeen, result.messagesUpserted, result.error ?? null, jobId);
   }
 
   getStats(chatId: string): Record<string, unknown> {
@@ -206,8 +309,26 @@ export class MessageStore {
         chat_id TEXT PRIMARY KEY,
         oldest_message_id INTEGER,
         newest_message_id INTEGER,
+        next_backfill_offset_id INTEGER,
         synced_count INTEGER NOT NULL DEFAULT 0,
+        last_recent_sync_at TEXT,
+        last_backfill_at TEXT,
+        last_error TEXT,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS history_jobs (
+        job_id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        status TEXT NOT NULL,
+        target_count INTEGER NOT NULL DEFAULT 0,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        batches INTEGER NOT NULL DEFAULT 0,
+        messages_seen INTEGER NOT NULL DEFAULT 0,
+        messages_upserted INTEGER NOT NULL DEFAULT 0,
+        error TEXT
       );
 
       CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -237,6 +358,17 @@ export class MessageStore {
       CREATE INDEX IF NOT EXISTS idx_messages_chat_message_id ON messages(chat_id, message_id);
       CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(chat_id, sender_id);
     `);
+    this.ensureColumn("sync_state", "next_backfill_offset_id", "INTEGER");
+    this.ensureColumn("sync_state", "last_recent_sync_at", "TEXT");
+    this.ensureColumn("sync_state", "last_backfill_at", "TEXT");
+    this.ensureColumn("sync_state", "last_error", "TEXT");
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[];
+    if (!rows.some((row) => row.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 }
 
@@ -284,6 +416,31 @@ function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
     replyToMessageId: row.reply_to_message_id == null ? undefined : Number(row.reply_to_message_id),
     topicId: row.topic_id == null ? undefined : Number(row.topic_id),
     rawJson: row.raw_json == null ? undefined : String(row.raw_json),
+  };
+}
+
+function rowToChatInfo(row: Record<string, unknown>): ChatInfo {
+  return {
+    chatId: String(row.chat_id),
+    requested: String(row.chat_id),
+    title: row.title == null ? undefined : String(row.title),
+    username: row.username == null ? undefined : String(row.username),
+    kind: row.kind == null ? "Cached" : String(row.kind),
+    isForum: row.is_forum === 1,
+  };
+}
+
+function rowToSyncState(row: Record<string, unknown>): SyncState {
+  return {
+    chatId: String(row.chat_id),
+    oldestMessageId: row.oldest_message_id == null ? undefined : Number(row.oldest_message_id),
+    newestMessageId: row.newest_message_id == null ? undefined : Number(row.newest_message_id),
+    nextBackfillOffsetId: row.next_backfill_offset_id == null ? undefined : Number(row.next_backfill_offset_id),
+    syncedCount: Number(row.synced_count ?? 0),
+    lastRecentSyncAt: row.last_recent_sync_at == null ? undefined : String(row.last_recent_sync_at),
+    lastBackfillAt: row.last_backfill_at == null ? undefined : String(row.last_backfill_at),
+    lastError: row.last_error == null ? undefined : String(row.last_error),
+    updatedAt: row.updated_at == null ? undefined : String(row.updated_at),
   };
 }
 

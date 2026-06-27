@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram Parilka MCP SQLite cache warmer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/telegram-parilka-mcp
+ExecStart=/root/telegram-parilka-mcp/bin/telegram-parilka-mcp-sync-daemon
+Restart=always
+RestartSec=10
+Environment=HOME=/root
+
+[Install]
+WantedBy=default.target

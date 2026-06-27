@@ -2,9 +2,10 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { fail, ok, ToolError } from "./errors.js";
 import { stringify } from "./json.js";
-import { gramMessageToStored, MessageStore } from "./store.js";
-import { TelegramService } from "./telegram-client.js";
+import { MessageStore } from "./store.js";
+import { type ChatInfo, TelegramService } from "./telegram-client.js";
 import { SendThrottler } from "./throttler.js";
+import { HistorySyncer } from "./sync-engine.js";
 
 type ToolDef = {
   name: string;
@@ -23,6 +24,7 @@ const jsonTool = (payload: unknown): ToolContent => ({
 
 export class TelegramTools {
   private readonly throttler: SendThrottler;
+  private readonly syncer: HistorySyncer;
 
   constructor(
     private readonly config: AppConfig,
@@ -30,6 +32,7 @@ export class TelegramTools {
     private readonly store: MessageStore,
   ) {
     this.throttler = new SendThrottler(config);
+    this.syncer = new HistorySyncer(config, telegram, store);
   }
 
   listTools(): ToolDef[] {
@@ -57,9 +60,10 @@ export class TelegramTools {
       {
         name: "sync_history",
         description:
-          "Backfill Telegram history into local SQLite cache. Supports large limits, but returns only sync metadata.",
+          "Sync Telegram history into local SQLite cache. Use this manually; normally run sync-daemon in the background.",
         inputSchema: objectSchema({
           chat: stringProp("Chat ID, @username, or omitted for TELEGRAM_DEFAULT_CHAT_ID."),
+          mode: enumProp(["both", "recent", "backfill"], "Sync direction. recent fetches messages above newest cached ID; backfill fetches older messages."),
           limit: numberProp("Messages to fetch. Max TELEGRAM_MAX_SYNC_LIMIT.", 1, 500000),
           batch_size: numberProp("Telegram page size.", 1, 1000),
           offset_id: numberProp("Start older-than this message ID. 0 means latest.", 0),
@@ -177,6 +181,7 @@ export class TelegramTools {
       dryRunDefault: this.config.safety.dryRunDefault,
       dbPath: this.config.storage.dbPath,
       isTelegramConfigured: this.telegram.isConfigured,
+      sync: this.config.sync,
       throttle: this.config.throttle,
     };
   }
@@ -198,50 +203,31 @@ export class TelegramTools {
   private async syncHistory(rawArgs: unknown): Promise<Record<string, unknown>> {
     const args = chatSchema
       .extend({
+        mode: z.enum(["both", "recent", "backfill"]).default("backfill"),
         limit: limitSchema.max(this.config.sync.maxSyncLimit).default(1000),
         batch_size: limitSchema.max(1000).default(this.config.sync.batchSize),
-        offset_id: z.number().int().nonnegative().default(0),
+        offset_id: z.number().int().nonnegative().optional(),
       })
       .parse(rawArgs ?? {});
 
-    const resolved = await this.telegram.resolveChat(args.chat);
-    let fetched = 0;
-    let saved = 0;
-    let offsetId = args.offset_id;
-    let newestMessageId: number | undefined;
-    let oldestMessageId: number | undefined;
-
-    while (fetched < args.limit) {
-      const pageLimit = Math.min(args.batch_size, args.limit - fetched);
-      const page = await this.telegram.getMessages({ chat: resolved.info.chatId, limit: pageLimit, offsetId });
-      const rows = page.messages.map((message) => gramMessageToStored(page.chat, message)).filter((row) => row != null);
-      if (rows.length === 0) {
-        break;
-      }
-      saved += this.store.upsertMessages(page.chat, rows);
-      fetched += page.messages.length;
-      const ids = rows.map((row) => row.messageId);
-      const minId = Math.min(...ids);
-      const maxId = Math.max(...ids);
-      oldestMessageId = oldestMessageId == null ? minId : Math.min(oldestMessageId, minId);
-      newestMessageId = newestMessageId == null ? maxId : Math.max(newestMessageId, maxId);
-      offsetId = minId;
-      if (page.messages.length < pageLimit) {
-        break;
-      }
+    if (args.mode === "both") {
+      const result = await this.syncer.syncOnce({
+        chat: args.chat,
+        recentLimit: args.limit,
+        backfillLimit: args.limit,
+        batchSize: args.batch_size,
+      });
+      return ok({ result });
     }
 
-    this.store.updateSyncState(resolved.info, { oldestMessageId, newestMessageId, syncedCount: saved });
-    return ok({
-      chat: resolved.info,
-      requested: args.limit,
-      fetched,
-      saved,
-      next_offset_id: offsetId,
-      oldest_message_id: oldestMessageId,
-      newest_message_id: newestMessageId,
-      stats: this.store.getStats(resolved.info.chatId),
+    const result = await this.syncer.syncDirection({
+      chat: args.chat,
+      mode: args.mode,
+      limit: args.limit,
+      batchSize: args.batch_size,
+      offsetId: args.offset_id,
     });
+    return ok({ result, stats: this.store.getStats(result.chat.chatId) });
   }
 
   private async readHistory(rawArgs: unknown): Promise<Record<string, unknown>> {
@@ -253,11 +239,11 @@ export class TelegramTools {
         order: z.enum(["asc", "desc"]).default("desc"),
       })
       .parse(rawArgs ?? {});
-    const resolved = await this.telegram.resolveChat(args.chat);
+    const chat = this.cacheChat(args.chat);
     return ok({
-      chat: resolved.info,
+      chat,
       messages: this.store.getHistory({
-        chatId: resolved.info.chatId,
+        chatId: chat.chatId,
         limit: args.limit,
         beforeId: args.before_id,
         afterId: args.after_id,
@@ -275,11 +261,11 @@ export class TelegramTools {
         after_id: z.number().int().positive().optional(),
       })
       .parse(rawArgs ?? {});
-    const resolved = await this.telegram.resolveChat(args.chat);
+    const chat = this.cacheChat(args.chat);
     return ok({
-      chat: resolved.info,
+      chat,
       messages: this.store.search({
-        chatId: resolved.info.chatId,
+        chatId: chat.chatId,
         query: args.query,
         limit: args.limit,
         beforeId: args.before_id,
@@ -296,12 +282,12 @@ export class TelegramTools {
         after: z.number().int().nonnegative().max(500).default(25),
       })
       .parse(rawArgs ?? {});
-    const resolved = await this.telegram.resolveChat(args.chat);
+    const chat = this.cacheChat(args.chat);
     return ok({
-      chat: resolved.info,
+      chat,
       center_message_id: args.message_id,
       messages: this.store.getThreadContext({
-        chatId: resolved.info.chatId,
+        chatId: chat.chatId,
         messageId: args.message_id,
         before: args.before,
         after: args.after,
@@ -400,6 +386,25 @@ export class TelegramTools {
       dedupe_key: args.dedupe_key,
       user_key: args.user_key,
     });
+  }
+
+  private cacheChat(chat?: string): ChatInfo {
+    const chatId = chat?.trim() || this.config.telegram.defaultChatId;
+    this.telegram.assertChatAllowed(chatId);
+    if (chatId.startsWith("@")) {
+      throw new ToolError({
+        category: "peer",
+        retryable: false,
+        message: "Cache-only reads require a numeric chat ID. Call resolve_chat/sync_history once for username targets.",
+      });
+    }
+    return (
+      this.store.getCachedChat(chatId) ?? {
+        chatId,
+        requested: chatId,
+        kind: "Cached",
+      }
+    );
   }
 }
 

@@ -23,6 +23,20 @@ npm run print-config
 npm run start
 ```
 
+## Cache warmer
+
+Run this as a long-lived process to keep SQLite warm. It fetches recent messages first, then an older backfill chunk, using cursors stored in SQLite:
+
+```bash
+npm run sync-daemon
+```
+
+One-shot mode, useful for cron/systemd timers:
+
+```bash
+npm run sync-once
+```
+
 MCP config example:
 
 ```toml

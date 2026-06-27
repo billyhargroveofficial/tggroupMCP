@@ -59,6 +59,14 @@ export class TelegramService {
     return client;
   }
 
+  async disconnect(): Promise<void> {
+    if (!this.client) {
+      return;
+    }
+    await this.client.disconnect();
+    this.client = undefined;
+  }
+
   assertChatAllowed(chat: string): void {
     if (!this.config.telegram.requireAllowlistedChat) {
       return;
@@ -117,16 +125,45 @@ export class TelegramService {
     chat?: string;
     limit: number;
     offsetId?: number;
+    minId?: number;
+    maxId?: number;
     ids?: number | number[];
   }): Promise<{ chat: ChatInfo; messages: any[] }> {
     const resolved = await this.resolveChat(params.chat);
     const client = await this.getClient();
-    const messages = await client.getMessages(resolved.input as never, {
-      limit: params.limit,
-      offsetId: params.offsetId,
-      ids: params.ids as never,
-    } as never);
+    const options: Record<string, unknown> = { limit: params.limit };
+    setIfDefined(options, "offsetId", params.offsetId);
+    setIfDefined(options, "minId", params.minId);
+    setIfDefined(options, "maxId", params.maxId);
+    setIfDefined(options, "ids", params.ids);
+    const messages = await client.getMessages(resolved.input as never, options as never);
     return { chat: resolved.info, messages: Array.from(messages as any) };
+  }
+
+  async iterateMessages(params: {
+    chat?: string;
+    limit: number;
+    offsetId?: number;
+    minId?: number;
+    maxId?: number;
+    waitTime?: number;
+  }): Promise<{ chat: ChatInfo; messages: AsyncIterable<any> }> {
+    const resolved = await this.resolveChat(params.chat);
+    const client = await this.getClient();
+    const options: Record<string, unknown> = { limit: params.limit };
+    setIfDefined(options, "offsetId", params.offsetId);
+    setIfDefined(options, "minId", params.minId);
+    setIfDefined(options, "maxId", params.maxId);
+    setIfDefined(options, "waitTime", params.waitTime);
+    const messages = client.iterMessages(resolved.input as never, options as never) as AsyncIterable<any>;
+
+    return { chat: resolved.info, messages };
+  }
+}
+
+function setIfDefined(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (value != null) {
+    target[key] = value;
   }
 }
 

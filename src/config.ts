@@ -1,10 +1,29 @@
-import "dotenv/config";
-import { mkdirSync } from "node:fs";
+import { parse as parseDotenv } from "dotenv";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
 
 const DEFAULT_PARILKA_CHAT_ID = "-1003179772905";
+const INITIAL_ENV_KEYS = new Set(Object.keys(process.env));
+
+loadEnvFile("/root/.config/telegram-mcp/.env", false);
+loadEnvFile(resolve(process.cwd(), ".env"), true);
+
+function loadEnvFile(path: string, preferOverLoadedFile: boolean): void {
+  if (!existsSync(path)) {
+    return;
+  }
+  const parsed = parseDotenv(readFileSync(path));
+  for (const [key, value] of Object.entries(parsed)) {
+    if (INITIAL_ENV_KEYS.has(key)) {
+      continue;
+    }
+    if (process.env[key] == null || preferOverLoadedFile) {
+      process.env[key] = value;
+    }
+  }
+}
 
 const intFromEnv = (name: string, fallback: number): number => {
   const raw = process.env[name];
@@ -59,6 +78,9 @@ export type AppConfig = {
     batchSize: number;
     maxSyncLimit: number;
     floodWaitMaxSleepSec: number;
+    intervalMs: number;
+    recentLimit: number;
+    backfillLimit: number;
   };
   throttle: {
     dedupeTtlMs: number;
@@ -114,6 +136,9 @@ export function loadConfig(): AppConfig {
       batchSize: intFromEnv("TELEGRAM_HISTORY_BATCH_SIZE", 100),
       maxSyncLimit: intFromEnv("TELEGRAM_MAX_SYNC_LIMIT", 500_000),
       floodWaitMaxSleepSec: intFromEnv("TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC", 10),
+      intervalMs: intFromEnv("TELEGRAM_SYNC_INTERVAL_MS", 60_000),
+      recentLimit: intFromEnv("TELEGRAM_SYNC_RECENT_LIMIT", 300),
+      backfillLimit: intFromEnv("TELEGRAM_SYNC_BACKFILL_LIMIT", 1_000),
     },
     throttle: {
       dedupeTtlMs: intFromEnv("TELEGRAM_DEDUPE_TTL_MS", 10 * 60_000),

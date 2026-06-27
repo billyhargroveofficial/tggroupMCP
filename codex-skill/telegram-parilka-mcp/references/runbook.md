@@ -31,6 +31,31 @@ printf '%s\n' \
 | ./bin/telegram-parilka-mcp
 ```
 
+## Background Cache Warmer
+
+Run one pass:
+
+```bash
+cd /root/telegram-parilka-mcp
+npm run sync-once
+```
+
+Install the user systemd service:
+
+```bash
+mkdir -p /root/.config/systemd/user
+cp /root/telegram-parilka-mcp/systemd/telegram-parilka-mcp-sync.service /root/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now telegram-parilka-mcp-sync.service
+```
+
+Check it:
+
+```bash
+systemctl --user status telegram-parilka-mcp-sync.service
+journalctl --user -u telegram-parilka-mcp-sync.service -n 100 --no-pager
+```
+
 ## Codex Config
 
 ```toml
