@@ -14,7 +14,7 @@ Use this skill to operate the `telegram-parilka-mcp` server safely. The default 
 - Never assume a named chat ID from memory. Call `get_config` or `resolve_chat` when the target matters.
 - Prefer `preview_message` or `send_message` with `dry_run: true` before public posts.
 - Do not send unless the user explicitly asked to send, or explicitly approved a draft in the current task.
-- Keep `TELEGRAM_SEND_ENABLED=false` unless the user intentionally enables live sending.
+- Live sending may be enabled in this deployment. Do not send unless the user explicitly asks for a concrete outgoing message or explicitly approves a draft.
 - Do not copy secrets, API hashes, or StringSession values into chat, commits, logs, or final answers.
 
 ## Workflow

@@ -128,8 +128,8 @@ export function loadConfig(): AppConfig {
       dbPath,
     },
     safety: {
-      sendEnabled: boolFromEnv("TELEGRAM_SEND_ENABLED", false),
-      dryRunDefault: boolFromEnv("TELEGRAM_DRY_RUN_DEFAULT", true),
+      sendEnabled: boolFromEnv("TELEGRAM_SEND_ENABLED", true),
+      dryRunDefault: boolFromEnv("TELEGRAM_DRY_RUN_DEFAULT", false),
       maxSendChars: intFromEnv("TELEGRAM_MAX_SEND_CHARS", 4096),
     },
     sync: {

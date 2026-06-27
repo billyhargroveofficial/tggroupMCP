@@ -44,4 +44,4 @@ MCP config example:
 command = "/root/telegram-parilka-mcp/bin/telegram-parilka-mcp"
 ```
 
-Sending is dry-run/disabled until `TELEGRAM_SEND_ENABLED=true`.
+Sending is live by default. Set `TELEGRAM_SEND_ENABLED=false` or pass `dry_run: true` to preview without posting.

@@ -14,8 +14,8 @@
 
 ## Sending
 
-- Sending is blocked unless `TELEGRAM_SEND_ENABLED=true`.
-- `TELEGRAM_DRY_RUN_DEFAULT=true` makes write tools preview by default.
+- Sending is live when `TELEGRAM_SEND_ENABLED=true`; this deployment may default to live sending.
+- `TELEGRAM_DRY_RUN_DEFAULT=true` or a tool call with `dry_run: true` makes write tools preview instead.
 - Use `dedupe_key` for repeated/actionable sends.
 - Use `user_key` to apply cooldowns fairly when multiple users trigger the agent.
 
