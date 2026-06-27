@@ -30,13 +30,17 @@ async function runDaemon(): Promise<void> {
   console.error(`telegram-parilka-mcp sync daemon running every ${intervalMs}ms`);
   while (true) {
     const started = Date.now();
-    const result = await syncer.syncOnce();
-    console.error(
-      `sync tick ${stringify({
-        recent: summarize(result.recent),
-        backfill: summarize(result.backfill),
-      })}`,
-    );
+    try {
+      const result = await syncer.syncOnce();
+      console.error(
+        `sync tick ${stringify({
+          recent: summarize(result.recent),
+          backfill: summarize(result.backfill),
+        })}`,
+      );
+    } finally {
+      await telegram.disconnect();
+    }
     const elapsed = Date.now() - started;
     await sleep(Math.max(1_000, intervalMs - elapsed));
   }
