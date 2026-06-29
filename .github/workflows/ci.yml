@@ -26,6 +26,12 @@ jobs:
       - name: Type check
         run: npm run check
 
+      - name: Shell syntax check
+        run: npm run check:shell
+
+      - name: Build
+        run: npm run build
+
       - name: Unit tests
         run: npm test
 
@@ -34,3 +40,6 @@ jobs:
 
       - name: MCP smoke
         run: npm run smoke:mcp
+
+      - name: MCP smoke through built wrapper
+        run: npm run smoke:mcp:wrapper

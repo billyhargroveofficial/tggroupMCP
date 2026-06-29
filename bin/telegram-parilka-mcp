@@ -5,4 +5,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="${TELEGRAM_PROJECT_DIR:-$(cd -- "$script_dir/.." && pwd)}"
 cd "$project_dir"
 
-exec node "$project_dir/dist/index.js" "$@"
+entrypoint="$project_dir/dist/index.js"
+"$project_dir/bin/telegram-parilka-mcp-check-build" "$project_dir" "$entrypoint"
+
+exec node "$entrypoint" "$@"

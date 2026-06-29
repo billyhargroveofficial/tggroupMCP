@@ -8,6 +8,7 @@ StartLimitBurst=3
 [Service]
 Type=simple
 WorkingDirectory=/root/telegram-parilka-mcp
+ExecStartPre=/root/telegram-parilka-mcp/bin/telegram-parilka-mcp-check-build /root/telegram-parilka-mcp /root/telegram-parilka-mcp/dist/sync-daemon.js
 ExecStart=/root/telegram-parilka-mcp/bin/telegram-parilka-mcp-sync-daemon
 Restart=on-failure
 RestartSec=30

@@ -6,11 +6,13 @@
 cd /root/telegram-parilka-mcp
 npm install
 npm run build
+npm run smoke:mcp:wrapper
 ./bin/telegram-parilka-mcp --print-config
 ```
 
 Wrappers derive the project directory from their own location, or from `TELEGRAM_PROJECT_DIR` when set, then exec the
-built Node entrypoint. They do not source `.env` as shell.
+built Node entrypoint. They fail with a clear `npm run build` remediation when `dist/*.js` is missing or older than
+the TypeScript source/config used to build it. They do not source `.env` as shell.
 
 Environment precedence is handled by TypeScript config with dotenv parsing:
 
@@ -38,6 +40,20 @@ Put the generated StringSession into `.env` as `TELEGRAM_SESSION`.
 
 ## MCP Smoke Test
 
+Source entrypoint smoke, useful while developing:
+
+```bash
+npm run smoke:mcp
+```
+
+Built wrapper smoke, required after `npm run build` and before deploying/restarting clients:
+
+```bash
+npm run smoke:mcp:wrapper
+```
+
+Manual JSON-RPC smoke through the wrapper:
+
 ```bash
 printf '%s\n' \
 '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}' \
@@ -58,11 +74,17 @@ npm run sync-once
 Install the user systemd service:
 
 ```bash
+cd /root/telegram-parilka-mcp
+npm run build
+npm run smoke:mcp:wrapper
 mkdir -p /root/.config/systemd/user
 cp /root/telegram-parilka-mcp/systemd/telegram-parilka-mcp-sync.service /root/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now telegram-parilka-mcp-sync.service
 ```
+
+Before restarting the service after code changes, run `npm run build`. The unit also runs a build freshness preflight
+and fails clearly if `dist/sync-daemon.js` is missing or stale.
 
 Check it:
 

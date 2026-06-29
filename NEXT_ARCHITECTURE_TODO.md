@@ -366,7 +366,26 @@ Important operating rule:
   - `before_id:2` never returns message `2`.
   - Tests cover semantic-only and hybrid results with overlapping chunks.
 
-- [ ] 10. Test deployed entrypoints, not only source entrypoints.
+- [x] 10. Test deployed entrypoints, not only source entrypoints.
+
+  Status 2026-06-29: Completed. CI now type-checks, syntax-checks shell wrappers, builds `dist`, runs unit tests,
+  runs the existing source-entrypoint MCP smoke, and runs a new smoke path through `./bin/telegram-parilka-mcp`.
+  The smoke harness supports `--wrapper` and reports whether it exercised `source` or `bin-wrapper`. All `./bin/*`
+  wrappers now run a shared build freshness guard before executing `dist/*.js`; missing or stale deployed entrypoints
+  fail with an explicit `npm run build` remediation. The systemd sync unit runs the same preflight for
+  `dist/sync-daemon.js`, and docs now call out build plus wrapper-smoke before deploy/restart.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/entrypoints.test.ts --test-reporter=spec`
+  - `npm run check:shell`
+  - `npm run check`
+  - `npm run build`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper`
+  - `./bin/telegram-parilka-mcp-check-build /root/telegram-parilka-mcp /root/telegram-parilka-mcp/dist/sync-daemon.js`
+  - `npm test`
+  - `npm run secret-scan`
 
   Problem:
   CI smoke starts `tsx src/index.ts`, while MCP clients and systemd wrappers run built `dist/*.js`. `dist/` is ignored, so a fresh deploy or stale build can pass CI but fail in production.

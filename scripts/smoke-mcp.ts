@@ -9,10 +9,12 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tempDir = mkdtempSync(join(tmpdir(), "telegram-parilka-mcp-smoke-"));
 const smokeChatId = "-1001234567890";
 const stderrChunks: string[] = [];
+const useWrapper = process.argv.includes("--wrapper");
+const entrypoint = useWrapper ? "bin-wrapper" : "source";
 
 const transport = new StdioClientTransport({
-  command: process.execPath,
-  args: ["--import", "tsx", "src/index.ts"],
+  command: useWrapper ? join(repoRoot, "bin", "telegram-parilka-mcp") : process.execPath,
+  args: useWrapper ? [] : ["--import", "tsx", "src/index.ts"],
   cwd: repoRoot,
   stderr: "pipe",
   env: {
@@ -59,7 +61,7 @@ try {
   assert(payload.config?.embeddings?.enabled === false, "smoke must keep embeddings disabled");
   assert(payload.config?.embeddings?.configured === false, "smoke must not inherit embedding credentials");
 
-  console.log(JSON.stringify({ ok: true, tools: tools.tools.length, checkedTool: "get_config" }, null, 2));
+  console.log(JSON.stringify({ ok: true, entrypoint, tools: tools.tools.length, checkedTool: "get_config" }, null, 2));
 } catch (error) {
   console.error("MCP smoke failed:", error);
   const stderr = stderrChunks.join("").trim();

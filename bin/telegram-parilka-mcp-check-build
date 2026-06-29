@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_dir="${1:?project directory is required}"
+entrypoint="${2:?built entrypoint is required}"
+
+if [[ ! -f "$entrypoint" ]]; then
+  printf 'telegram-parilka-mcp: missing built entrypoint: %s\n' "$entrypoint" >&2
+  printf 'Run: cd %q && npm run build\n' "$project_dir" >&2
+  exit 78
+fi
+
+stale_source="$(
+  find "$project_dir/src" "$project_dir/package.json" "$project_dir/tsconfig.json" \
+    -type f -newer "$entrypoint" -print -quit
+)"
+
+if [[ -n "$stale_source" ]]; then
+  printf 'telegram-parilka-mcp: built entrypoint is stale: %s\n' "$entrypoint" >&2
+  printf 'Newer source/config file: %s\n' "$stale_source" >&2
+  printf 'Run: cd %q && npm run build\n' "$project_dir" >&2
+  exit 78
+fi

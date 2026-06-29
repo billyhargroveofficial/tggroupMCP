@@ -13,8 +13,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
+    "check:shell": "bash -n bin/telegram-parilka-mcp bin/telegram-parilka-mcp-check-build bin/telegram-parilka-mcp-sync-daemon bin/telegram-parilka-mcp-embed-index bin/telegram-parilka-mcp-generate-session",
     "test": "node --test --import tsx tests/*.test.ts",
     "smoke:mcp": "tsx scripts/smoke-mcp.ts",
+    "smoke:mcp:wrapper": "tsx scripts/smoke-mcp.ts --wrapper",
     "secret-scan": "tsx scripts/secret-scan.ts",
     "dev": "tsx src/index.ts",
     "generate-session": "tsx src/generate-session.ts",

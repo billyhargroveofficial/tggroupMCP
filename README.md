@@ -12,6 +12,7 @@ npm install
 cp .env.example .env
 npm run generate-session
 npm run build
+npm run smoke:mcp:wrapper
 ```
 
 Put the generated `TELEGRAM_SESSION` into `.env`.
@@ -22,6 +23,10 @@ Put the generated `TELEGRAM_SESSION` into `.env`.
 npm run print-config
 npm run start
 ```
+
+MCP clients and systemd should use the `./bin/*` wrappers. They execute the built `dist/*.js` files and fail with a
+clear `npm run build` remediation when the build is missing or stale. Run `npm run build` and
+`npm run smoke:mcp:wrapper` before restarting deployed clients or services.
 
 ## Cache warmer
 
