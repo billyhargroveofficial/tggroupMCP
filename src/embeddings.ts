@@ -28,6 +28,8 @@ type EmbeddingsResponse = {
   };
 };
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export class EmbeddingClient {
   constructor(private readonly config: AppConfig) {}
 
@@ -62,6 +64,24 @@ export class EmbeddingClient {
       return [];
     }
 
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.embedTextsOnce(texts);
+      } catch (error) {
+        const normalized = error instanceof ToolError ? error.normalized : undefined;
+        if (!normalized?.retryable || attempt >= this.config.embeddings.maxRetries) {
+          throw error;
+        }
+        const retryDelayMs =
+          normalized.retryAfterSec != null
+            ? normalized.retryAfterSec * 1000
+            : this.config.embeddings.retryInitialMs * 2 ** attempt;
+        await sleep(retryDelayMs);
+      }
+    }
+  }
+
+  private async embedTextsOnce(texts: string[]): Promise<number[][]> {
     const body: Record<string, unknown> = {
       model: this.config.embeddings.model,
       input: texts,
@@ -71,20 +91,42 @@ export class EmbeddingClient {
       body.dimensions = this.config.embeddings.dimensions;
     }
 
-    const response = await fetch(`${this.config.embeddings.baseUrl.replace(/\/$/, "")}/embeddings`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${this.config.embeddings.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.config.embeddings.requestTimeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(`${this.config.embeddings.baseUrl.replace(/\/$/, "")}/embeddings`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.config.embeddings.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) {
+        throw new ToolError({
+          category: "internal",
+          retryable: true,
+          message: `Embedding API request timed out after ${this.config.embeddings.requestTimeoutMs}ms.`,
+        });
+      }
+      throw new ToolError({
+        category: "internal",
+        retryable: true,
+        message: `Embedding API request failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     const payload = (await response.json().catch(() => ({}))) as EmbeddingsResponse;
 
     if (!response.ok) {
       throw new ToolError({
         category: response.status === 429 ? "rate_limit" : "internal",
         retryable: response.status >= 500 || response.status === 429,
+        retryAfterSec: parseRetryAfterSec(response.headers.get("retry-after")),
         message: payload.error?.message || `Embedding API request failed with HTTP ${response.status}.`,
       });
     }
@@ -120,6 +162,25 @@ export class EmbeddingClient {
       };
     });
   }
+}
+
+function parseRetryAfterSec(raw: string | null): number | undefined {
+  if (raw == null || raw.trim() === "") {
+    return undefined;
+  }
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds;
+  }
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) {
+    return Math.max(0, Math.ceil((dateMs - Date.now()) / 1000));
+  }
+  return undefined;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 export function vectorToBlob(vector: number[]): Buffer {

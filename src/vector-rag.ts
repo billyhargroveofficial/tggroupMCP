@@ -13,8 +13,18 @@ export type EmbeddingIndexResult = {
   nextAfterMessageId?: number;
   deletedChunks?: number;
   dirtyChunksDeleted?: number;
+  budget: EmbeddingRunBudget;
   coverage: Record<string, number>;
   stats: Array<Record<string, unknown>>;
+};
+
+export type EmbeddingRunBudget = {
+  requestedLimitChunks: number;
+  effectiveLimitChunks: number;
+  maxChunksPerRun: number;
+  maxCharsPerRun: number;
+  truncatedByChunkBudget: boolean;
+  truncatedByCharBudget: boolean;
 };
 
 export type EmbeddingIndexEstimate = {
@@ -24,10 +34,12 @@ export type EmbeddingIndexEstimate = {
   dimensions?: number;
   chatId: string;
   limitChunks: number;
+  requestedLimitChunks: number;
   estimatedChunks: number;
   estimatedMessages: number;
   estimatedChars: number;
   existingChunks: number;
+  budget: EmbeddingRunBudget;
   coverage: Record<string, number>;
   firstRun: boolean;
   requiresConfirmation: boolean;
@@ -102,11 +114,12 @@ export class VectorRag {
       : undefined;
     let afterMessageId = params.afterMessageId;
 
-    const inputs = this.buildChunks(params.chatId, {
+    const plan = this.buildChunks(params.chatId, {
       afterMessageId,
       limitChunks,
       includeCovered: params.rebuild,
     });
+    const inputs = plan.chunks;
     let chunksCreated = 0;
     let messagesCovered = 0;
 
@@ -136,6 +149,7 @@ export class VectorRag {
       nextAfterMessageId: afterMessageId,
       deletedChunks,
       dirtyChunksDeleted,
+      budget: { ...estimate.budget, truncatedByCharBudget: plan.truncatedByCharBudget },
       coverage: this.store.getEmbeddingCoverageStats({
         chatId: params.chatId,
         model: this.config.embeddings.model,
@@ -152,13 +166,15 @@ export class VectorRag {
     rebuild?: boolean;
   }): EmbeddingIndexEstimate {
     this.embeddings.assertConfigured();
-    const limitChunks = Math.max(1, params.limitChunks ?? this.config.embeddings.tickChunkLimit);
+    const requestedLimitChunks = Math.max(1, params.limitChunks ?? this.config.embeddings.tickChunkLimit);
+    const limitChunks = Math.min(requestedLimitChunks, this.config.embeddings.maxChunksPerRun);
     const stats = this.store.getEmbeddingStats(params.chatId);
-    const inputs = this.buildChunks(params.chatId, {
+    const plan = this.buildChunks(params.chatId, {
       afterMessageId: params.afterMessageId,
       limitChunks,
       includeCovered: params.rebuild,
     });
+    const inputs = plan.chunks;
     const existingChunks = stats.reduce((sum, row) => sum + Number(row.chunks ?? 0), 0);
     const estimatedChunks = inputs.length;
     const firstRun = existingChunks === 0;
@@ -170,10 +186,19 @@ export class VectorRag {
       dimensions: this.config.embeddings.dimensions,
       chatId: params.chatId,
       limitChunks,
+      requestedLimitChunks,
       estimatedChunks,
       estimatedMessages: inputs.reduce((sum, chunk) => sum + chunk.messageCount, 0),
       estimatedChars: inputs.reduce((sum, chunk) => sum + chunk.text.length, 0),
       existingChunks,
+      budget: {
+        requestedLimitChunks,
+        effectiveLimitChunks: limitChunks,
+        maxChunksPerRun: this.config.embeddings.maxChunksPerRun,
+        maxCharsPerRun: this.config.embeddings.maxCharsPerRun,
+        truncatedByChunkBudget: requestedLimitChunks > limitChunks,
+        truncatedByCharBudget: plan.truncatedByCharBudget,
+      },
       coverage: this.store.getEmbeddingCoverageStats({
         chatId: params.chatId,
         model: this.config.embeddings.model,
@@ -267,12 +292,14 @@ export class VectorRag {
   private buildChunks(
     chatId: string,
     params: { afterMessageId?: number; limitChunks: number; includeCovered?: boolean },
-  ): EmbeddingChunkInput[] {
+  ): { chunks: EmbeddingChunkInput[]; truncatedByCharBudget: boolean } {
     const chunks: EmbeddingChunkInput[] = [];
     let cursor = params.afterMessageId;
     let buffer: StoredMessage[] = [];
     let bufferChars = 0;
     const fetchLimit = Math.max(this.config.embeddings.chunkMessages * params.limitChunks * 2, 500);
+    let totalChars = 0;
+    let truncatedByCharBudget = false;
 
     const flush = (): void => {
       if (buffer.length === 0 || chunks.length >= params.limitChunks) {
@@ -280,19 +307,21 @@ export class VectorRag {
       }
       const first = buffer[0]!;
       const last = buffer[buffer.length - 1]!;
+      const text = buffer.map(formatMessage).join("\n");
       chunks.push({
         chatId,
         startMessageId: first.messageId,
         endMessageId: last.messageId,
         messageIds: buffer.map((message) => message.messageId),
         messageCount: buffer.length,
-        text: buffer.map(formatMessage).join("\n"),
+        text,
       });
+      totalChars += text.length;
       buffer = [];
       bufferChars = 0;
     };
 
-    while (chunks.length < params.limitChunks) {
+    outer: while (chunks.length < params.limitChunks && !truncatedByCharBudget) {
       const messages = params.includeCovered
         ? this.store.getMessagesForEmbedding({
             chatId,
@@ -311,16 +340,22 @@ export class VectorRag {
       }
 
       for (const message of messages) {
-        cursor = message.messageId;
         const formatted = formatMessage(message);
-        if (buffer.length > 0 && bufferChars + formatted.length > this.config.embeddings.chunkMaxChars) {
+        let additionalChars = formatted.length + (buffer.length > 0 ? 1 : 0);
+        if (buffer.length > 0 && bufferChars + additionalChars > this.config.embeddings.chunkMaxChars) {
           flush();
+          additionalChars = formatted.length;
         }
         if (chunks.length >= params.limitChunks) {
           break;
         }
+        if (totalChars + bufferChars + additionalChars > this.config.embeddings.maxCharsPerRun) {
+          truncatedByCharBudget = true;
+          break outer;
+        }
+        cursor = message.messageId;
         buffer.push(message);
-        bufferChars += formatted.length;
+        bufferChars += additionalChars;
         if (buffer.length >= this.config.embeddings.chunkMessages) {
           flush();
         }
@@ -331,7 +366,7 @@ export class VectorRag {
       }
     }
     flush();
-    return chunks.slice(0, params.limitChunks);
+    return { chunks: chunks.slice(0, params.limitChunks), truncatedByCharBudget };
   }
 
   private toVectorHit(chunk: StoredEmbeddingChunk, score: number, rank: number, includeMessages: boolean): VectorSearchHit {

@@ -235,9 +235,14 @@ export class TelegramTools {
         baseUrl: this.config.embeddings.baseUrl,
         model: this.config.embeddings.model,
         dimensions: this.config.embeddings.dimensions,
+        requestTimeoutMs: this.config.embeddings.requestTimeoutMs,
+        maxRetries: this.config.embeddings.maxRetries,
+        retryInitialMs: this.config.embeddings.retryInitialMs,
         chunkMessages: this.config.embeddings.chunkMessages,
         chunkMaxChars: this.config.embeddings.chunkMaxChars,
         tickChunkLimit: this.config.embeddings.tickChunkLimit,
+        maxChunksPerRun: this.config.embeddings.maxChunksPerRun,
+        maxCharsPerRun: this.config.embeddings.maxCharsPerRun,
       },
       throttle: this.config.throttle,
     };
@@ -414,16 +419,19 @@ export class TelegramTools {
       afterMessageId: args.after_message_id,
       rebuild: args.rebuild,
     });
-    if (args.estimate_only || (estimate.requiresConfirmation && !args.confirm_estimate)) {
+    const budgetRequiresConfirmation =
+      (estimate.budget.truncatedByChunkBudget || estimate.budget.truncatedByCharBudget) && !args.confirm_estimate;
+    if (args.estimate_only || (estimate.requiresConfirmation && !args.confirm_estimate) || budgetRequiresConfirmation) {
       return ok({
         chat,
         estimate,
-        requires_confirmation: estimate.requiresConfirmation && !args.confirm_estimate,
+        requires_confirmation: (estimate.requiresConfirmation && !args.confirm_estimate) || budgetRequiresConfirmation,
         result: null,
       });
     }
     return ok({
       chat,
+      estimate,
       result: await this.vectorRag.indexCachedMessages({
         chatId: chat.chatId,
         limitChunks: args.limit_chunks,

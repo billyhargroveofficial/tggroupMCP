@@ -530,6 +530,15 @@ Acceptance criteria:
 
 ### 17. Add embedding API timeout, retry, and budget controls
 
+Status 2026-06-29: Completed while preserving explicit embedding opt-in. Embedding API calls now use `AbortController` with `TELEGRAM_EMBEDDINGS_REQUEST_TIMEOUT_MS`, retry retryable network/timeout/429/5xx failures up to `TELEGRAM_EMBEDDINGS_MAX_RETRIES`, and honor HTTP `Retry-After` before falling back to exponential `TELEGRAM_EMBEDDINGS_RETRY_INITIAL_MS` backoff. Indexing caps each run with `TELEGRAM_EMBEDDINGS_MAX_CHUNKS_PER_RUN` and `TELEGRAM_EMBEDDINGS_MAX_CHARS_PER_RUN`; estimates/results include requested/effective chunk limits, char/chunk truncation flags, and coverage. The `index_embeddings` MCP tool returns the estimate without calling the embedding API when a manual request is budget-truncated unless `confirm_estimate:true` is provided.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec` (53 passed)
+- `npm run check`
+- `npm run print-config`
+- `npm run validate-config`
+
 Problem:
 Embedding calls have no timeout/retry/backoff/cost budget. Large manual jobs can send many chunks and hang or spend unexpectedly.
 

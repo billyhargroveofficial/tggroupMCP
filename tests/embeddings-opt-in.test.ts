@@ -100,6 +100,36 @@ test("daemon skips first embedding run and reports the estimate", async () => {
   assert.equal((result?.estimate as { chatId?: string }).chatId, CHAT.chatId);
 });
 
+test("manual large embedding run reports budget estimate before API calls", async () => {
+  const store = seededStore();
+  const tools = new TelegramTools(
+    config({ enabled: true, apiKey: "test-key", maxChunksPerRun: 1 }),
+    new FakeTelegram() as unknown as TelegramService,
+    store,
+  );
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("fetch should not be called before confirming a budget-truncated estimate");
+  };
+  try {
+    const result = await callTool(tools, "index_embeddings", {
+      chat: CHAT.chatId,
+      limit_chunks: 10,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.requires_confirmation, true);
+    assert.equal(result.result, null);
+    const estimate = result.estimate as Record<string, any>;
+    assert.equal(estimate.requestedLimitChunks, 10);
+    assert.equal(estimate.limitChunks, 1);
+    assert.equal(estimate.budget.truncatedByChunkBudget, true);
+    assert.equal(Number(estimate.estimatedChars) > 0, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 function seededStore(): MessageStore {
   const store = new MessageStore(":memory:");
   store.upsertMessages(CHAT, [
@@ -160,9 +190,14 @@ function config(embeddings?: Partial<AppConfig["embeddings"]>): AppConfig {
       model: "text-embedding-3-small",
       dimensions: 256,
       apiBatchSize: 64,
+      requestTimeoutMs: 60_000,
+      maxRetries: 2,
+      retryInitialMs: 0,
       chunkMessages: 12,
       chunkMaxChars: 1600,
       tickChunkLimit: 100,
+      maxChunksPerRun: 1000,
+      maxCharsPerRun: 500_000,
       searchLimit: 12,
       ...embeddings,
     },

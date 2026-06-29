@@ -184,6 +184,8 @@ export async function indexEmbeddings(
       chunksCreated: result.chunksCreated,
       messagesCovered: result.messagesCovered,
       nextAfterMessageId: result.nextAfterMessageId,
+      budget: result.budget,
+      coverage: result.coverage,
     };
   } catch (error) {
     return {

@@ -49,9 +49,14 @@ export const NUMERIC_ENV_RULES = {
   TELEGRAM_SYNC_BACKOFF_MAX_MS: { fallback: 5 * 60_000, min: 1_000, max: 24 * 60 * 60_000 },
   TELEGRAM_EMBEDDINGS_DIMENSIONS: { fallback: 256, min: 1, max: 16_384 },
   TELEGRAM_EMBEDDINGS_API_BATCH_SIZE: { fallback: 64, min: 1, max: 2_048 },
+  TELEGRAM_EMBEDDINGS_REQUEST_TIMEOUT_MS: { fallback: 60_000, min: 100, max: 60 * 60_000 },
+  TELEGRAM_EMBEDDINGS_MAX_RETRIES: { fallback: 2, min: 0, max: 10 },
+  TELEGRAM_EMBEDDINGS_RETRY_INITIAL_MS: { fallback: 1_000, min: 0, max: 60 * 60_000 },
   TELEGRAM_EMBEDDINGS_CHUNK_MESSAGES: { fallback: 12, min: 1, max: 1_000 },
   TELEGRAM_EMBEDDINGS_CHUNK_MAX_CHARS: { fallback: 1600, min: 1, max: 200_000 },
   TELEGRAM_EMBEDDINGS_TICK_CHUNK_LIMIT: { fallback: 100, min: 1, max: 100_000 },
+  TELEGRAM_EMBEDDINGS_MAX_CHUNKS_PER_RUN: { fallback: 1_000, min: 1, max: 100_000 },
+  TELEGRAM_EMBEDDINGS_MAX_CHARS_PER_RUN: { fallback: 500_000, min: 1, max: 50_000_000 },
   TELEGRAM_EMBEDDINGS_SEARCH_LIMIT: { fallback: 12, min: 1, max: 1_000 },
   TELEGRAM_DEDUPE_TTL_MS: { fallback: 10 * 60_000, min: 1_000, max: 30 * 24 * 60 * 60_000 },
   TELEGRAM_USER_COOLDOWN_MS: { fallback: 20_000, min: 0, max: 24 * 60 * 60_000 },
@@ -148,9 +153,14 @@ export type AppConfig = {
     model: string;
     dimensions?: number;
     apiBatchSize: number;
+    requestTimeoutMs: number;
+    maxRetries: number;
+    retryInitialMs: number;
     chunkMessages: number;
     chunkMaxChars: number;
     tickChunkLimit: number;
+    maxChunksPerRun: number;
+    maxCharsPerRun: number;
     searchLimit: number;
   };
   throttle: {
@@ -227,9 +237,14 @@ export function loadConfig(): AppConfig {
       model: process.env.TELEGRAM_EMBEDDINGS_MODEL?.trim() || "text-embedding-3-small",
       dimensions: embeddingDimensions,
       apiBatchSize: intFromEnv("TELEGRAM_EMBEDDINGS_API_BATCH_SIZE"),
+      requestTimeoutMs: intFromEnv("TELEGRAM_EMBEDDINGS_REQUEST_TIMEOUT_MS"),
+      maxRetries: intFromEnv("TELEGRAM_EMBEDDINGS_MAX_RETRIES"),
+      retryInitialMs: intFromEnv("TELEGRAM_EMBEDDINGS_RETRY_INITIAL_MS"),
       chunkMessages: intFromEnv("TELEGRAM_EMBEDDINGS_CHUNK_MESSAGES"),
       chunkMaxChars: intFromEnv("TELEGRAM_EMBEDDINGS_CHUNK_MAX_CHARS"),
       tickChunkLimit: intFromEnv("TELEGRAM_EMBEDDINGS_TICK_CHUNK_LIMIT"),
+      maxChunksPerRun: intFromEnv("TELEGRAM_EMBEDDINGS_MAX_CHUNKS_PER_RUN"),
+      maxCharsPerRun: intFromEnv("TELEGRAM_EMBEDDINGS_MAX_CHARS_PER_RUN"),
       searchLimit: intFromEnv("TELEGRAM_EMBEDDINGS_SEARCH_LIMIT"),
     },
     throttle: {
@@ -278,9 +293,14 @@ export function redactedConfig(config: AppConfig): Record<string, unknown> {
       model: config.embeddings.model,
       dimensions: config.embeddings.dimensions,
       apiBatchSize: config.embeddings.apiBatchSize,
+      requestTimeoutMs: config.embeddings.requestTimeoutMs,
+      maxRetries: config.embeddings.maxRetries,
+      retryInitialMs: config.embeddings.retryInitialMs,
       chunkMessages: config.embeddings.chunkMessages,
       chunkMaxChars: config.embeddings.chunkMaxChars,
       tickChunkLimit: config.embeddings.tickChunkLimit,
+      maxChunksPerRun: config.embeddings.maxChunksPerRun,
+      maxCharsPerRun: config.embeddings.maxCharsPerRun,
       searchLimit: config.embeddings.searchLimit,
     },
     throttle: config.throttle,

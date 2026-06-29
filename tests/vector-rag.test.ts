@@ -149,27 +149,125 @@ test("vector hits hydrate exact chunk message ids across empty messages", async 
   );
 });
 
-function mockEmbeddingFetch(t: { after(fn: () => void): void }): void {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (_url, init) => {
-    const body = JSON.parse(String((init as RequestInit).body ?? "{}")) as { input?: string | string[] };
-    const inputs = Array.isArray(body.input) ? body.input : [body.input ?? ""];
-    return new Response(
-      JSON.stringify({
-        data: inputs.map((input, index) => ({
-          index,
-          embedding: embeddingForText(String(input)),
-        })),
+test("embedding API requests time out with AbortController", async (t) => {
+  mockFetch(t, async (_url, init) => {
+    const signal = (init as RequestInit).signal as AbortSignal | undefined;
+    return new Promise<Response>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      });
+    });
+  });
+  const store = new MessageStore(":memory:");
+  const vectorRag = new VectorRag(config({ requestTimeoutMs: 10, maxRetries: 0 }), store);
+  store.upsertMessages(CHAT, [{ chatId: CHAT.chatId, messageId: 1, senderName: "alice", text: "plain alpha" }]);
+
+  await assert.rejects(
+    () =>
+      vectorRag.indexCachedMessages({
+        chatId: CHAT.chatId,
+        limitChunks: 1,
+        confirmFirstRun: true,
       }),
-      {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      },
-    );
-  };
+    /Embedding API request timed out after 10ms/,
+  );
+});
+
+test("embedding API retry honors retry-after for 429 responses", async (t) => {
+  let calls = 0;
+  mockFetch(t, async (_url, init) => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ error: { message: "slow down" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "Retry-After": "0" },
+      });
+    }
+    return embeddingResponse(init as RequestInit);
+  });
+  const store = new MessageStore(":memory:");
+  const vectorRag = new VectorRag(config({ maxRetries: 1, retryInitialMs: 0 }), store);
+  store.upsertMessages(CHAT, [{ chatId: CHAT.chatId, messageId: 1, senderName: "alice", text: "plain alpha" }]);
+
+  const result = await vectorRag.indexCachedMessages({
+    chatId: CHAT.chatId,
+    limitChunks: 1,
+    confirmFirstRun: true,
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.chunksCreated, 1);
+});
+
+test("embedding indexing respects chunk and character budgets", async (t) => {
+  mockEmbeddingFetch(t);
+  const store = new MessageStore(":memory:");
+  const vectorRag = new VectorRag(
+    config({ chunkMessages: 1, maxChunksPerRun: 2, maxCharsPerRun: 500_000 }),
+    store,
+  );
+  store.upsertMessages(
+    CHAT,
+    [1, 2, 3, 4, 5].map((messageId) => ({
+      chatId: CHAT.chatId,
+      messageId,
+      senderName: "alice",
+      text: `budget message ${messageId}`,
+    })),
+  );
+
+  const estimate = vectorRag.estimateIndexCachedMessages({ chatId: CHAT.chatId, limitChunks: 10 });
+  assert.equal(estimate.requestedLimitChunks, 10);
+  assert.equal(estimate.limitChunks, 2);
+  assert.equal(estimate.budget.truncatedByChunkBudget, true);
+  assert.equal(estimate.estimatedChunks, 2);
+
+  const result = await vectorRag.indexCachedMessages({
+    chatId: CHAT.chatId,
+    limitChunks: 10,
+    confirmFirstRun: true,
+  });
+  assert.equal(result.chunksCreated, 2);
+  assert.equal(result.messagesCovered, 2);
+  assert.equal(result.coverage.uncovered_messages, 3);
+
+  const charBudgetStore = new MessageStore(":memory:");
+  const charBudgetRag = new VectorRag(config({ maxCharsPerRun: 1 }), charBudgetStore);
+  charBudgetStore.upsertMessages(CHAT, [{ chatId: CHAT.chatId, messageId: 1, senderName: "alice", text: "too large" }]);
+  const charEstimate = charBudgetRag.estimateIndexCachedMessages({ chatId: CHAT.chatId, limitChunks: 10 });
+  assert.equal(charEstimate.estimatedChunks, 0);
+  assert.equal(charEstimate.budget.truncatedByCharBudget, true);
+});
+
+function mockEmbeddingFetch(t: { after(fn: () => void): void }): void {
+  mockFetch(t, async (_url, init) => embeddingResponse(init as RequestInit));
+}
+
+function mockFetch(t: { after(fn: () => void): void }, handler: typeof globalThis.fetch): void {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = handler;
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
+}
+
+function embeddingResponse(init: RequestInit): Response {
+  const body = JSON.parse(String(init.body ?? "{}")) as { input?: string | string[] };
+  const inputs = Array.isArray(body.input) ? body.input : [body.input ?? ""];
+  return new Response(
+    JSON.stringify({
+      data: inputs.map((input, index) => ({
+        index,
+        embedding: embeddingForText(String(input)),
+      })),
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    },
+  );
 }
 
 function embeddingForText(text: string): number[] {
@@ -180,7 +278,7 @@ function embeddingForText(text: string): number[] {
   return [0, 1];
 }
 
-function config(): AppConfig {
+function config(embeddings: Partial<AppConfig["embeddings"]> = {}): AppConfig {
   return {
     telegram: {
       apiId: 1,
@@ -221,10 +319,16 @@ function config(): AppConfig {
       model: "text-embedding-3-small",
       dimensions: 2,
       apiBatchSize: 64,
+      requestTimeoutMs: 60_000,
+      maxRetries: 2,
+      retryInitialMs: 0,
       chunkMessages: 2,
       chunkMaxChars: 1600,
       tickChunkLimit: 100,
+      maxChunksPerRun: 1000,
+      maxCharsPerRun: 500_000,
       searchLimit: 12,
+      ...embeddings,
     },
     throttle: {
       dedupeTtlMs: 600_000,
