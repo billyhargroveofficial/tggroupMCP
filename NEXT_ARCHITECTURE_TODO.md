@@ -453,7 +453,24 @@ Important operating rule:
   - `sent` cannot be overwritten by `failed` or `expired`.
   - Tests cover stale queued, expired queued, terminal sent, terminal failed, and terminal expired rows.
 
-- [ ] 12. Preflight reply targets before approval and reservation.
+- [x] 12. Preflight reply targets before approval and reservation.
+
+  Status 2026-06-29: Completed. `preview_message`, dry-run sends, live sends, and `reply_to_message` now validate
+  optional reply targets before live approval consumption, send outbox reservation, or cooldown mutation. The preflight
+  checks the local cache first, rejects cached tombstones, and falls back to a bounded `getMessages({ ids, limit:1 })`
+  lookup when the target is not cached. Found live targets are stored in the cache and previews/dry-runs return a short
+  `reply_target` metadata object with source, sender/date, and text excerpt. Missing/deleted targets return
+  `category:"reply"` and do not consume the approval token.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/send-safety.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   Preview/dry-run validates only positive reply IDs. Invalid or deleted reply targets are discovered only by Telegram after approval consumption, outbox reservation, and cooldown mutation.

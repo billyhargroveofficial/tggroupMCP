@@ -93,4 +93,5 @@ Sending is preview-only by default. Live posts require explicit operator opt-in 
 pass the returned `approval_id` to `send_message` or `reply_to_message` with the exact same chat, text, reply id, parse
 mode, link preview, and silent options. `TELEGRAM_DRY_RUN_DEFAULT=true` or `TELEGRAM_SEND_ENABLED=false` forces every
 send tool call into hard dry-run mode; callers cannot override that with `dry_run:false`, even when the approval bypass
-flag is set.
+flag is set. Reply targets are validated before approvals are consumed or send outbox rows are reserved; previews and
+dry-runs include a short reply target excerpt when the target is available.

@@ -17,9 +17,9 @@ Default chat: `-1003179772905` (`Парилка228`). All tools accept optional 
 
 ## Write Tools
 
-- `preview_message`: validate text length, bytes, formatting warnings, and target chat without sending. Returns a short-lived `approval_id` for the exact previewed payload.
-- `send_message`: send or dry-run a message. Respects allowlist, hard dry-run config, live-send approval, dedupe, per-user cooldown, per-chat queue, and global concurrency.
-- `reply_to_message`: convenience wrapper for `send_message` with required `message_id`; live replies require a matching preview approval too.
+- `preview_message`: validate text length, bytes, formatting warnings, target chat, and optional reply target without sending. Returns a short-lived `approval_id` for the exact previewed payload.
+- `send_message`: send or dry-run a message. Respects allowlist, hard dry-run config, live-send approval, reply-target preflight, dedupe, per-user cooldown, per-chat queue, and global concurrency.
+- `reply_to_message`: convenience wrapper for `send_message` with required `message_id`; live replies require a matching preview approval too. Reply targets are checked before approval consumption and outbox reservation.
 
 ## Output Shape
 

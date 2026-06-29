@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { fail, ok, ToolError } from "./errors.js";
 import { stringify } from "./json.js";
-import { MessageStore, type ChatCacheStatus, type SyncState } from "./store.js";
+import { gramMessageToStored, MessageStore, type ChatCacheStatus, type StoredMessage, type SyncState } from "./store.js";
 import { type ChatInfo, TelegramService } from "./telegram-client.js";
 import { SendThrottler } from "./throttler.js";
 import { HistorySyncer } from "./sync-engine.js";
@@ -20,8 +20,17 @@ const emptySchema = z.object({}).strict();
 const chatSchema = z.object({ chat: z.string().optional() }).strict();
 const limitSchema = z.number().int().positive();
 const SERVER_SEND_USER_KEY = "mcp-server";
+const REPLY_TARGET_EXCERPT_CHARS = 240;
 
 type ToolContent = { content: Array<{ type: "text"; text: string }> };
+type ReplyTargetMetadata = {
+  message_id: number;
+  source: "cache" | "live";
+  date?: string;
+  sender_id?: string;
+  sender_name?: string;
+  text_excerpt?: string;
+};
 
 const jsonTool = (payload: unknown): ToolContent => ({
   content: [{ type: "text" as const, text: stringify(payload) }],
@@ -575,6 +584,7 @@ export class TelegramTools {
     const resolved = await this.telegram.resolveChat(args.chat);
     this.store.upsertChat(resolved.info);
     const warnings = validateSendText(args.text, this.config.safety.maxSendChars);
+    const replyTarget = await this.preflightReplyTarget(resolved.info, args.reply_to_message_id);
     const approval = this.approvals.create(
       approvalPayload({
         chatId: resolved.info.chatId,
@@ -594,6 +604,7 @@ export class TelegramTools {
       utf8_bytes: Buffer.byteLength(args.text, "utf8"),
       parse_mode: args.parse_mode,
       reply_to_message_id: args.reply_to_message_id,
+      reply_target: replyTarget,
       link_preview: args.link_preview,
       silent: args.silent,
       warnings,
@@ -621,6 +632,7 @@ export class TelegramTools {
     if (warnings.some((warning) => warning.severity === "error")) {
       throw new ToolError({ category: "formatting", retryable: false, message: warnings.map((w) => w.message).join("; ") });
     }
+    const replyTarget = await this.preflightReplyTarget(resolved.info, args.reply_to_message_id);
 
     const hardDryRun = this.config.safety.dryRunDefault || !this.config.safety.sendEnabled;
     const dryRun = hardDryRun || args.dry_run === true;
@@ -631,6 +643,7 @@ export class TelegramTools {
         send_enabled: this.config.safety.sendEnabled,
         chat: resolved.info,
         reply_to_message_id: args.reply_to_message_id,
+        reply_target: replyTarget,
         text_chars: args.text.length,
         utf8_bytes: Buffer.byteLength(args.text, "utf8"),
         warnings,
@@ -666,6 +679,38 @@ export class TelegramTools {
         }),
     });
     return ok({ dry_run: false, sent, warnings });
+  }
+
+  private async preflightReplyTarget(
+    chat: ChatInfo,
+    replyToMessageId: number | undefined,
+  ): Promise<ReplyTargetMetadata | undefined> {
+    if (replyToMessageId == null) {
+      return undefined;
+    }
+
+    const cached = this.store.getMessagesByIds({ chatId: chat.chatId, messageIds: [replyToMessageId] })[0];
+    if (cached) {
+      if (cached.deletedAt) {
+        throw replyTargetError(chat.chatId, replyToMessageId, "Reply target is deleted in the local cache.");
+      }
+      return replyTargetMetadata(cached, "cache");
+    }
+
+    const live = await this.telegram.getMessages({
+      chat: chat.chatId,
+      ids: replyToMessageId,
+      limit: 1,
+    });
+    this.store.upsertChat(live.chat);
+    const liveMessage = live.messages.find((message) => isUsableLiveReplyTarget(message, replyToMessageId));
+    const stored = liveMessage == null ? undefined : gramMessageToStored(live.chat, liveMessage);
+    if (!stored || stored.messageId !== replyToMessageId) {
+      throw replyTargetError(chat.chatId, replyToMessageId, "Reply target was not found by a bounded Telegram lookup.");
+    }
+
+    this.store.upsertMessages(live.chat, [stored]);
+    return replyTargetMetadata(stored, "live");
   }
 
   private async replyToMessage(rawArgs: unknown): Promise<Record<string, unknown>> {
@@ -731,6 +776,45 @@ function validateSendText(text: string, maxChars: number): Array<{ severity: "wa
     warnings.push({ severity: "warning", message: "Telegram Markdown can render ** literally; prefer parse_mode html." });
   }
   return warnings;
+}
+
+function replyTargetMetadata(message: StoredMessage, source: "cache" | "live"): ReplyTargetMetadata {
+  const trimmedText = message.text.trim();
+  return {
+    message_id: message.messageId,
+    source,
+    date: message.date,
+    sender_id: message.senderId,
+    sender_name: message.senderName,
+    text_excerpt: trimmedText ? truncateReplyExcerpt(trimmedText) : undefined,
+  };
+}
+
+function truncateReplyExcerpt(text: string): string {
+  if (text.length <= REPLY_TARGET_EXCERPT_CHARS) {
+    return text;
+  }
+  return `${text.slice(0, REPLY_TARGET_EXCERPT_CHARS - 3)}...`;
+}
+
+function isUsableLiveReplyTarget(message: any, expectedId: number): boolean {
+  const messageId = Number(message?.id);
+  if (messageId !== expectedId) {
+    return false;
+  }
+  const kind = String(message?.className ?? message?.constructor?.name ?? "");
+  if (kind.toLowerCase().includes("empty") || message?.deleted === true) {
+    return false;
+  }
+  return true;
+}
+
+function replyTargetError(chatId: string, replyToMessageId: number, detail: string): ToolError {
+  return new ToolError({
+    category: "reply",
+    retryable: false,
+    message: `Invalid reply target ${replyToMessageId} in chat ${chatId}. ${detail}`,
+  });
 }
 
 type SendApprovalPayload = {
