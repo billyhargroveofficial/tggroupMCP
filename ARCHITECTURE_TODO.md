@@ -343,6 +343,13 @@ Acceptance criteria:
 
 ### 11. Normalize MCP error and status semantics
 
+Status 2026-06-29: Completed. Zod argument failures now return `ok:false` with `category:"validation"` and field paths. Numeric tool input schemas now use JSON Schema `integer`. `sync_history` returns explicit top-level `status`, `chat`, and `stats` for single and `both` modes; sync failures/skips are represented as `status:"failed"`, `status:"partial"`, or `status:"skipped"` instead of requiring callers to infer from nested errors. Tool map docs include validation category plus success/partial/failure examples.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+
 Problem:
 Some sync failures become `{ ok:true, result.error }`, while docs imply normalized errors. Tool response shapes differ across modes.
 

@@ -8,6 +8,7 @@ import { type ChatInfo, TelegramService } from "./telegram-client.js";
 import { SendThrottler } from "./throttler.js";
 import { HistorySyncer } from "./sync-engine.js";
 import { VectorRag } from "./vector-rag.js";
+import type { SyncOnceResult, SyncResult } from "./sync-engine.js";
 
 type ToolDef = {
   name: string;
@@ -275,7 +276,12 @@ export class TelegramTools {
         backfillLimit: args.limit,
         batchSize: args.batch_size,
       });
-      return ok({ result });
+      return ok({
+        status: syncOnceStatus(result),
+        chat: result.chat == null ? undefined : { chatId: result.chat },
+        result,
+        stats: result.chat == null ? undefined : this.store.getStats(result.chat),
+      });
     }
 
     const result = await this.syncer.syncDirection({
@@ -287,7 +293,7 @@ export class TelegramTools {
       resetBackfillExhausted: args.reset_backfill_exhausted,
       commitCursor: args.commit_cursor ?? args.offset_id == null,
     });
-    return ok({ result, stats: this.store.getStats(result.chat.chatId) });
+    return ok({ status: result.status, chat: result.chat, result, stats: this.store.getStats(result.chat.chatId) });
   }
 
   private async readHistory(rawArgs: unknown): Promise<Record<string, unknown>> {
@@ -741,9 +747,26 @@ function boolProp(description: string): Record<string, unknown> {
 }
 
 function numberProp(description: string, minimum?: number, maximum?: number): Record<string, unknown> {
-  return { type: "number", description, minimum, maximum };
+  return { type: "integer", description, minimum, maximum };
 }
 
 function enumProp(values: string[], description: string): Record<string, unknown> {
   return { type: "string", enum: values, description };
+}
+
+function syncOnceStatus(result: SyncOnceResult): "done" | "failed" | "partial" | "skipped" {
+  const statuses = [result.recent?.status, result.backfill?.status].filter((status): status is SyncResult["status"] => status != null);
+  if (statuses.length === 0) {
+    return "skipped";
+  }
+  if (statuses.every((status) => status === "done")) {
+    return "done";
+  }
+  if (statuses.every((status) => status === "skipped")) {
+    return "skipped";
+  }
+  if (statuses.every((status) => status === "failed")) {
+    return "failed";
+  }
+  return "partial";
 }

@@ -1,10 +1,13 @@
+import { ZodError } from "zod";
+
 export type NormalizedError = {
-  category: "rate_limit" | "permission" | "formatting" | "reply" | "peer" | "auth" | "internal";
+  category: "rate_limit" | "permission" | "formatting" | "reply" | "peer" | "auth" | "validation" | "internal";
   telegramCode?: number;
   telegramType?: string;
   retryAfterSec?: number;
   retryable: boolean;
   message: string;
+  fields?: Array<{ path: string; message: string }>;
 };
 
 export class ToolError extends Error {
@@ -19,6 +22,17 @@ export class ToolError extends Error {
 export function normalizeError(error: unknown): NormalizedError {
   if (error instanceof ToolError) {
     return error.normalized;
+  }
+  if (error instanceof ZodError) {
+    return {
+      category: "validation",
+      retryable: false,
+      message: "Invalid tool arguments.",
+      fields: error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      })),
+    };
   }
 
   const anyError = error as { message?: string; errorMessage?: string; code?: number };

@@ -7,7 +7,7 @@ Default chat: `-1003179772905` (`Парилка228`). All tools accept optional 
 - `get_config`: return redacted config, default chat, allowlist, dry-run state, and throttle settings.
 - `resolve_chat`: resolve and cache a Telegram peer. Use before important actions.
 - `get_chat_info`: resolve chat and return local SQLite cache stats.
-- `sync_history`: backfill history into SQLite. Use bounded pages; the server returns metadata, not a huge message dump.
+- `sync_history`: backfill history into SQLite. Use bounded pages; the server returns `status`, `chat`, `stats`, and metadata, not a huge message dump.
 - `read_history`: read cached messages by `limit`, `before_id`, `after_id`, and order.
 - `search_messages`: multi-channel cached search; returns keyword FTS hits, vector/cosine chunks when indexed, and hybrid candidates.
 - `semantic_search_messages`: vector/cosine search over indexed cached message chunks.
@@ -33,10 +33,25 @@ or normalized errors:
 ```json
 {
   "ok": false,
-  "error": {
-    "category": "rate_limit | permission | formatting | reply | peer | auth | internal",
+    "error": {
+    "category": "rate_limit | permission | formatting | reply | peer | auth | validation | internal",
     "retryable": false,
+    "fields": [{ "path": "limit", "message": "Expected number" }],
     "message": "..."
   }
 }
+```
+
+`sync_history` uses explicit status values:
+
+```json
+{ "ok": true, "status": "done", "chat": { "chatId": "-1003179772905" }, "stats": {}, "result": {} }
+```
+
+```json
+{ "ok": true, "status": "partial", "chat": { "chatId": "-1003179772905" }, "result": { "recent": {}, "backfill": { "status": "failed" } } }
+```
+
+```json
+{ "ok": true, "status": "failed", "chat": { "chatId": "-1003179772905" }, "result": { "status": "failed", "error": {} } }
 ```
