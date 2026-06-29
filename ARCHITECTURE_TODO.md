@@ -405,6 +405,13 @@ Acceptance criteria:
 
 ### 13. Add message reconciliation for edits/deletes
 
+Status 2026-06-29: Completed for the recent sliding window. Schema version 4 adds `messages.deleted_at` tombstones and `message_embedding_chunks.dirty_at`. Recent sync reconciles a cached recent ID window via `getMessages({ ids })`, upserts returned messages to pick up edits, and tombstones missing IDs by clearing text so FTS no longer returns deleted content. Message text/deletion changes mark overlapping embedding chunks dirty, and embedding stats expose `dirty_chunks`.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+
 Problem:
 The cache is append/upsert oriented. Recent sync only fetches messages above newest id; deleted or edited older messages may remain stale.
 

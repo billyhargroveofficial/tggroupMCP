@@ -1,7 +1,7 @@
 import type { AppConfig } from "./config.js";
 import { normalizeError, ToolError } from "./errors.js";
 import { gramMessageToStored, MessageStore, type StoredMessage } from "./store.js";
-import { TelegramService } from "./telegram-client.js";
+import { type ChatInfo, TelegramService } from "./telegram-client.js";
 
 export type SyncDirection = "recent" | "backfill";
 
@@ -21,6 +21,11 @@ export type SyncResult = {
   oldestMessageId?: number;
   newestMessageId?: number;
   skipped?: "backfill_exhausted";
+  reconciliation?: {
+    checked: number;
+    refreshed: number;
+    deleted: number;
+  };
   error?: ReturnType<typeof normalizeError>;
 };
 
@@ -134,6 +139,7 @@ export class HistorySyncer {
     let batches = 0;
     let newestMessageId: number | undefined;
     let oldestMessageId: number | undefined;
+    let reconciliation: SyncResult["reconciliation"];
     let rows: StoredMessage[] = [];
     const seen = new Set<string>();
 
@@ -247,6 +253,9 @@ export class HistorySyncer {
       if (params.mode === "backfill") {
         this.store.setBackfillExhausted(chat, fetched === 0);
       }
+      if (params.mode === "recent") {
+        reconciliation = await this.reconcileRecentWindow(chat, Math.max(1, Math.min(target, this.config.sync.recentLimit)));
+      }
       this.store.finishHistoryJob(jobId, {
         status: "done",
         batches,
@@ -266,6 +275,7 @@ export class HistorySyncer {
         nextOffsetId: offsetId,
         oldestMessageId,
         newestMessageId,
+        reconciliation,
       };
     } catch (error) {
       const normalized = normalizeError(error);
@@ -296,5 +306,25 @@ export class HistorySyncer {
         error: normalized,
       };
     }
+  }
+
+  private async reconcileRecentWindow(chat: ChatInfo, limit: number): Promise<NonNullable<SyncResult["reconciliation"]>> {
+    const ids = this.store.getRecentMessageIds(chat.chatId, limit);
+    if (ids.length === 0) {
+      return { checked: 0, refreshed: 0, deleted: 0 };
+    }
+    const response = await this.telegram.getMessages({
+      chat: chat.chatId,
+      limit: ids.length,
+      ids,
+    });
+    const rows = response.messages
+      .map((message) => gramMessageToStored(response.chat, message))
+      .filter((row): row is StoredMessage => row != null);
+    const returned = new Set(rows.map((row) => row.messageId));
+    const missing = ids.filter((id) => !returned.has(id));
+    const refreshed = this.store.upsertMessages(chat, rows);
+    const deleted = this.store.markMessagesDeleted(chat.chatId, missing);
+    return { checked: ids.length, refreshed, deleted };
   }
 }

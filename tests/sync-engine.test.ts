@@ -55,6 +55,22 @@ class FakeTelegram {
       })(),
     };
   }
+
+  async getMessages(params: {
+    ids?: number | number[];
+  }): Promise<{ chat: ChatInfo; messages: Array<Record<string, unknown>> }> {
+    const ids = Array.isArray(params.ids) ? params.ids : params.ids == null ? [] : [params.ids];
+    return {
+      chat: CHAT,
+      messages: ids
+        .filter((id) => this.ids.includes(id))
+        .map((id) => ({
+          id,
+          message: `message ${id}`,
+          date: 1_800_000_000 + id,
+        })),
+    };
+  }
 }
 
 test("recent sync catches up all pages above the previous newest id", async () => {
@@ -267,6 +283,67 @@ test("explicit cursor commits must match the current daemon cursor", async () =>
     /commit_cursor:true requires offset_id to match current backfill cursor 1000/,
   );
   assert.equal(telegram.requests.length, 0);
+});
+
+test("recent reconciliation updates edited messages and marks embedding chunks dirty", async () => {
+  const store = new MessageStore(":memory:");
+  store.upsertMessages(CHAT, [
+    {
+      chatId: CHAT.chatId,
+      messageId: 1000,
+      text: "old searchable text",
+    },
+  ]);
+  store.updateSyncState(CHAT, {
+    oldestMessageId: 1000,
+    newestMessageId: 1000,
+    syncedCount: store.countMessages(CHAT.chatId),
+    mode: "recent",
+    error: null,
+  });
+  store.upsertEmbeddingChunks([
+    {
+      chatId: CHAT.chatId,
+      startMessageId: 1000,
+      endMessageId: 1000,
+      messageCount: 1,
+      text: "old searchable text",
+      model: "test",
+      dimensions: 3,
+      embedding: new Uint8Array([1, 2, 3]),
+      contentHash: "old",
+    },
+  ]);
+  const telegram = new FakeTelegram([1000]);
+  const syncer = new HistorySyncer(config(), telegram as unknown as TelegramService, store);
+
+  const result = await syncer.syncDirection({
+    mode: "recent",
+    limit: 10,
+    batchSize: 5,
+  });
+
+  assert.equal(result.reconciliation?.refreshed, 1);
+  assert.equal(store.search({ chatId: CHAT.chatId, query: "old", limit: 10 }).length, 0);
+  assert.equal(store.search({ chatId: CHAT.chatId, query: "message", limit: 10 })[0]?.messageId, 1000);
+  assert.equal(store.getEmbeddingStats(CHAT.chatId)[0]?.dirty_chunks, 1);
+});
+
+test("recent reconciliation tombstones deleted messages and removes searchable content", async () => {
+  const store = seededStore(1000);
+  const telegram = new FakeTelegram([]);
+  const syncer = new HistorySyncer(config(), telegram as unknown as TelegramService, store);
+
+  const result = await syncer.syncDirection({
+    mode: "recent",
+    limit: 10,
+    batchSize: 5,
+  });
+
+  const [message] = store.getHistory({ chatId: CHAT.chatId, limit: 1, order: "asc" });
+  assert.equal(result.reconciliation?.deleted, 1);
+  assert.equal(typeof message?.deletedAt, "string");
+  assert.equal(store.search({ chatId: CHAT.chatId, query: "message", limit: 10 }).length, 0);
 });
 
 function seededStore(newestMessageId: number): MessageStore {

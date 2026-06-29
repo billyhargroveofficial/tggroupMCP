@@ -6,7 +6,7 @@ import type { ChatInfo } from "./telegram-client.js";
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
 const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 export type StoredMessage = {
   id?: number;
@@ -19,6 +19,7 @@ export type StoredMessage = {
   replyToMessageId?: number;
   topicId?: number;
   rawJson?: string;
+  deletedAt?: string;
 };
 
 export type SyncState = {
@@ -50,6 +51,7 @@ export type StoredEmbeddingChunk = {
   dimensions: number;
   embedding: Uint8Array;
   contentHash: string;
+  dirtyAt?: string;
   updatedAt: string;
 };
 
@@ -138,9 +140,9 @@ export class MessageStore {
       const stmt = this.db.prepare(
         `INSERT INTO messages (
            chat_id, message_id, date, sender_id, sender_name, text,
-           reply_to_message_id, topic_id, raw_json, updated_at
+           reply_to_message_id, topic_id, raw_json, deleted_at, updated_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(chat_id, message_id) DO UPDATE SET
            date = excluded.date,
            sender_id = excluded.sender_id,
@@ -149,9 +151,11 @@ export class MessageStore {
            reply_to_message_id = excluded.reply_to_message_id,
            topic_id = excluded.topic_id,
            raw_json = excluded.raw_json,
+           deleted_at = excluded.deleted_at,
            updated_at = excluded.updated_at`,
       );
       for (const row of messages) {
+        const previous = this.getMessageForDirtyCheck(row.chatId, row.messageId);
         stmt.run(
           row.chatId,
           row.messageId,
@@ -162,7 +166,11 @@ export class MessageStore {
           row.replyToMessageId ?? null,
           row.topicId ?? null,
           row.rawJson ?? null,
+          row.deletedAt ?? null,
         );
+        if (previous && (previous.text !== row.text || previous.deletedAt !== (row.deletedAt ?? null))) {
+          this.markEmbeddingChunksDirtyForMessagesLocked(row.chatId, [row.messageId]);
+        }
       }
       return new Set(messages.map((message) => `${message.chatId}:${message.messageId}`)).size;
     });
@@ -224,6 +232,41 @@ export class MessageStore {
       )
       .all(...toSqlValues(values)) as Record<string, unknown>[];
     return rows.map(rowToStoredMessage);
+  }
+
+  getRecentMessageIds(chatId: string, limit: number): number[] {
+    const rows = this.db
+      .prepare(
+        `SELECT message_id
+         FROM messages
+         WHERE chat_id = ? AND deleted_at IS NULL
+         ORDER BY message_id DESC
+         LIMIT ?`,
+      )
+      .all(chatId, limit) as Record<string, unknown>[];
+    return rows.map((row) => Number(row.message_id));
+  }
+
+  markMessagesDeleted(chatId: string, messageIds: number[]): number {
+    if (messageIds.length === 0) {
+      return 0;
+    }
+    return this.immediateTransaction("markMessagesDeleted", () => {
+      let changed = 0;
+      const stmt = this.db.prepare(
+        `UPDATE messages
+         SET text = '', deleted_at = datetime('now'), updated_at = datetime('now')
+         WHERE chat_id = ? AND message_id = ? AND deleted_at IS NULL`,
+      );
+      for (const messageId of messageIds) {
+        const result = stmt.run(chatId, messageId);
+        if (Number(result.changes ?? 0) > 0) {
+          changed += Number(result.changes ?? 0);
+          this.markEmbeddingChunksDirtyForMessagesLocked(chatId, [messageId]);
+        }
+      }
+      return changed;
+    });
   }
 
   search(params: { chatId: string; query: string; limit: number; beforeId?: number; afterId?: number }): StoredMessage[] {
@@ -416,15 +459,16 @@ export class MessageStore {
       const stmt = this.db.prepare(
         `INSERT INTO message_embedding_chunks (
            chat_id, start_message_id, end_message_id, message_count, text,
-           embedding_model, embedding_dimensions, embedding, content_hash, updated_at
+           embedding_model, embedding_dimensions, embedding, content_hash, dirty_at, updated_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))
          ON CONFLICT(chat_id, start_message_id, end_message_id, embedding_model, embedding_dimensions)
          DO UPDATE SET
            message_count = excluded.message_count,
            text = excluded.text,
            embedding = excluded.embedding,
            content_hash = excluded.content_hash,
+           dirty_at = NULL,
            updated_at = excluded.updated_at`,
       );
       for (const chunk of chunks) {
@@ -502,6 +546,7 @@ export class MessageStore {
            MIN(start_message_id) AS oldest_message_id,
            MAX(end_message_id) AS newest_message_id,
            SUM(message_count) AS indexed_messages,
+           SUM(CASE WHEN dirty_at IS NOT NULL THEN 1 ELSE 0 END) AS dirty_chunks,
            MAX(updated_at) AS updated_at
          FROM message_embedding_chunks
          WHERE chat_id = ?
@@ -853,6 +898,10 @@ export class MessageStore {
         this.applyChatAliasMigration();
         this.db.exec("PRAGMA user_version = 3");
       }
+      if (currentVersion < 4) {
+        this.applyMessageReconciliationMigration();
+        this.db.exec("PRAGMA user_version = 4");
+      }
       this.validateSchema();
     });
   }
@@ -885,6 +934,7 @@ export class MessageStore {
         reply_to_message_id INTEGER,
         topic_id INTEGER,
         raw_json TEXT,
+        deleted_at TEXT,
         updated_at TEXT NOT NULL,
         UNIQUE(chat_id, message_id)
       );
@@ -953,6 +1003,7 @@ export class MessageStore {
         embedding_dimensions INTEGER NOT NULL,
         embedding BLOB NOT NULL,
         content_hash TEXT NOT NULL,
+        dirty_at TEXT,
         updated_at TEXT NOT NULL,
         UNIQUE(chat_id, start_message_id, end_message_id, embedding_model, embedding_dimensions)
       );
@@ -1005,7 +1056,9 @@ export class MessageStore {
     this.ensureColumn("messages", "reply_to_message_id", "INTEGER");
     this.ensureColumn("messages", "topic_id", "INTEGER");
     this.ensureColumn("messages", "raw_json", "TEXT");
+    this.ensureColumn("messages", "deleted_at", "TEXT");
     this.ensureColumn("messages", "updated_at", "TEXT");
+    this.ensureColumn("message_embedding_chunks", "dirty_at", "TEXT");
   }
 
   private applyBackfillExhaustedMigration(): void {
@@ -1026,6 +1079,11 @@ export class MessageStore {
     for (const row of chats) {
       this.upsertChatLocked(rowToChatInfo(row));
     }
+  }
+
+  private applyMessageReconciliationMigration(): void {
+    this.ensureColumn("messages", "deleted_at", "TEXT");
+    this.ensureColumn("message_embedding_chunks", "dirty_at", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -1067,7 +1125,8 @@ export class MessageStore {
     for (const trigger of ["messages_ai", "messages_ad", "messages_au"]) {
       this.assertSqliteObject("trigger", trigger);
     }
-    this.assertColumns("messages", ["id", "chat_id", "message_id", "text", "updated_at"]);
+    this.assertColumns("messages", ["id", "chat_id", "message_id", "text", "deleted_at", "updated_at"]);
+    this.assertColumns("message_embedding_chunks", ["id", "chat_id", "dirty_at", "updated_at"]);
     this.assertColumns("sync_state", [
       "chat_id",
       "oldest_message_id",
@@ -1099,6 +1158,30 @@ export class MessageStore {
       if (!present.has(column)) {
         throw new Error(`Database schema validation failed: ${table} missing required column ${column}.`);
       }
+    }
+  }
+
+  private getMessageForDirtyCheck(chatId: string, messageId: number): { text: string; deletedAt: string | null } | undefined {
+    const row = this.db
+      .prepare("SELECT text, deleted_at FROM messages WHERE chat_id = ? AND message_id = ?")
+      .get(chatId, messageId) as Record<string, unknown> | undefined;
+    if (!row) {
+      return undefined;
+    }
+    return {
+      text: String(row.text ?? ""),
+      deletedAt: row.deleted_at == null ? null : String(row.deleted_at),
+    };
+  }
+
+  private markEmbeddingChunksDirtyForMessagesLocked(chatId: string, messageIds: number[]): void {
+    const stmt = this.db.prepare(
+      `UPDATE message_embedding_chunks
+       SET dirty_at = COALESCE(dirty_at, datetime('now')), updated_at = datetime('now')
+       WHERE chat_id = ? AND start_message_id <= ? AND end_message_id >= ?`,
+    );
+    for (const messageId of messageIds) {
+      stmt.run(chatId, messageId, messageId);
     }
   }
 }
@@ -1147,6 +1230,7 @@ function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
     replyToMessageId: row.reply_to_message_id == null ? undefined : Number(row.reply_to_message_id),
     topicId: row.topic_id == null ? undefined : Number(row.topic_id),
     rawJson: row.raw_json == null ? undefined : String(row.raw_json),
+    deletedAt: row.deleted_at == null ? undefined : String(row.deleted_at),
   };
 }
 
@@ -1208,6 +1292,7 @@ function rowToEmbeddingChunk(row: Record<string, unknown>): StoredEmbeddingChunk
     dimensions: Number(row.embedding_dimensions),
     embedding: row.embedding as Uint8Array,
     contentHash: String(row.content_hash),
+    dirtyAt: row.dirty_at == null ? undefined : String(row.dirty_at),
     updatedAt: String(row.updated_at),
   };
 }
