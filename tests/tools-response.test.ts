@@ -197,6 +197,51 @@ test("read_history reports applied filters and outside cache range", async () =>
   assert.equal(cache.sync_state.newestMessageId, 11);
 });
 
+test("read_history reports empty reasons for cache range branches", async () => {
+  const emptyCache = await callTool(makeTools(new MessageStore(":memory:")), "read_history", {
+    limit: 5,
+  });
+  assert.equal(cacheMeta(emptyCache).relation.completeness, "empty_cache");
+  assert.equal(cacheMeta(emptyCache).empty_reason, "cache_empty");
+
+  const store = new MessageStore(":memory:");
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 10, text: "cached ten" },
+    { chatId: CHAT.chatId, messageId: 12, text: "cached twelve" },
+  ]);
+
+  const beforeRange = await callTool(makeTools(store), "read_history", {
+    before_id: 10,
+    limit: 5,
+  });
+  assert.equal(cacheMeta(beforeRange).relation.completeness, "outside_cached_range");
+  assert.equal(cacheMeta(beforeRange).empty_reason, "requested_before_cached_range");
+
+  const afterRange = await callTool(makeTools(store), "read_history", {
+    after_id: 99,
+    limit: 5,
+  });
+  assert.equal(cacheMeta(afterRange).relation.completeness, "outside_cached_range");
+  assert.equal(cacheMeta(afterRange).empty_reason, "requested_after_cached_range");
+
+  const impossible = await callTool(makeTools(store), "read_history", {
+    after_id: 12,
+    before_id: 10,
+    limit: 5,
+  });
+  assert.equal(cacheMeta(impossible).relation.completeness, "no_matching_message_ids");
+  assert.equal(cacheMeta(impossible).empty_reason, "filters_exclude_all_message_ids");
+
+  const withinGap = await callTool(makeTools(store), "read_history", {
+    after_id: 10,
+    before_id: 12,
+    limit: 5,
+  });
+  assert.equal(withinGap.returned_count, 0);
+  assert.equal(cacheMeta(withinGap).relation.completeness, "within_cached_range");
+  assert.equal(cacheMeta(withinGap).empty_reason, "no_cached_rows_in_requested_range");
+});
+
 test("get_thread_context reports center_found and partial cache range", async () => {
   const store = new MessageStore(":memory:");
   store.upsertMessages(CHAT, [
@@ -226,13 +271,41 @@ test("get_thread_context reports center_found and partial cache range", async ()
     after: 2,
   });
   const cache = result.cache as {
+    empty_reason?: string;
     relation: { completeness: string; partial_cached_range: boolean; may_omit_newer_messages: boolean };
     requested_range: { start_message_id: number; end_message_id: number };
   };
   assert.equal(cache.relation.completeness, "partial_cached_range");
   assert.equal(cache.relation.partial_cached_range, true);
   assert.equal(cache.relation.may_omit_newer_messages, true);
+  assert.equal(cache.empty_reason, undefined);
   assert.deepEqual(cache.requested_range, { start_message_id: 10, end_message_id: 14 });
+});
+
+test("get_thread_context reports outside-range and within-gap empty reasons", async () => {
+  const store = new MessageStore(":memory:");
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 10, text: "cached ten" },
+    { chatId: CHAT.chatId, messageId: 12, text: "cached twelve" },
+  ]);
+
+  const outsideBefore = await callTool(makeTools(store), "get_thread_context", {
+    message_id: 1,
+    before: 0,
+    after: 0,
+  });
+  assert.equal(outsideBefore.returned_count, 0);
+  assert.equal(cacheMeta(outsideBefore).relation.completeness, "outside_cached_range");
+  assert.equal(cacheMeta(outsideBefore).empty_reason, "requested_before_cached_range");
+
+  const withinGap = await callTool(makeTools(store), "get_thread_context", {
+    message_id: 11,
+    before: 0,
+    after: 0,
+  });
+  assert.equal(withinGap.returned_count, 0);
+  assert.equal(cacheMeta(withinGap).relation.completeness, "within_cached_range");
+  assert.equal(cacheMeta(withinGap).empty_reason, "no_cached_rows_in_requested_range");
 });
 
 test("search_messages reports degraded vector channel when embeddings are disabled", async () => {
@@ -462,6 +535,16 @@ function assertVectorDegraded(result: Record<string, unknown>, reason: RegExp): 
   assert.equal(degraded[0]?.channel, "vector");
   assert.match(degraded[0]?.reason ?? "", reason);
   assert.deepEqual(result.partial_failure, { degraded_channels: degraded });
+}
+
+function cacheMeta(result: Record<string, unknown>): {
+  relation: { completeness: string };
+  empty_reason?: string;
+} {
+  return result.cache as {
+    relation: { completeness: string };
+    empty_reason?: string;
+  };
 }
 
 function mockFetch(t: { after(fn: () => void): void }, handler: typeof globalThis.fetch): void {

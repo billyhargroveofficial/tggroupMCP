@@ -585,6 +585,7 @@ export class TelegramTools {
         messageId: args.message_id,
         before: args.before,
         after: args.after,
+        returnedCount: messages.length,
       }),
       messages,
     });
@@ -1111,6 +1112,7 @@ function contextCacheMetadata(params: {
   messageId: number;
   before: number;
   after: number;
+  returnedCount: number;
 }): Record<string, unknown> {
   const startMessageId = Math.max(1, params.messageId - params.before);
   const endMessageId = params.messageId + params.after;
@@ -1123,7 +1125,7 @@ function contextCacheMetadata(params: {
       end_message_id: endMessageId,
     },
     relation,
-    empty_reason: emptyReason(relation),
+    empty_reason: params.returnedCount === 0 ? emptyReason(relation) : undefined,
   };
 }
 
@@ -1218,6 +1220,10 @@ function emptyReason(relation: Record<string, unknown>): string | undefined {
         : "requested_after_cached_range";
     case "no_matching_message_ids":
       return "filters_exclude_all_message_ids";
+    case "partial_cached_range":
+      return "no_cached_rows_in_partial_cached_range";
+    case "within_cached_range":
+      return "no_cached_rows_in_requested_range";
     default:
       return undefined;
   }

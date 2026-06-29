@@ -652,7 +652,24 @@ Important operating rule:
   - Tests cover embeddings disabled, no index, provider failure, candidate-limit failure, keyword-only, vector-only, and hybrid-overlap cases.
   - Docs clearly tell agents which field to read first.
 
-- [ ] 17. Finish cache completeness semantics and tests.
+- [x] 17. Finish cache completeness semantics and tests.
+
+  Status 2026-06-29: Completed. Cache metadata now has explicit empty reasons for zero-row windows inside cached
+  ranges (`no_cached_rows_in_requested_range`) and partial cached ranges (`no_cached_rows_in_partial_cached_range`).
+  `get_thread_context` now computes `empty_reason` only when its returned count is zero, so partial contexts with
+  cached rows are not mislabeled as empty. Tool docs list every `relation.completeness` value and every
+  `empty_reason` value. Tests cover empty cache, before-range miss, after-range miss, impossible `after_id >= before_id`,
+  within-cache gaps, context outside-range, context within-gap, and context partial-range cases.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/tools-response.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   The current TODO/docs claim empty windows distinguish every case, but `emptyReason()` does not return a reason for within-range gaps. Test coverage exercises only a subset of branches.

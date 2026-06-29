@@ -15,6 +15,18 @@ Default chat: `-1003179772905` (`Парилка228`). All tools accept optional 
 - `index_embeddings`: build local SQLite vector chunks from cached messages via the configured embeddings API.
 - `get_thread_context`: cached messages around a message ID. Includes `center_found`, requested range, returned count, and cache range/completeness metadata.
 
+Cache metadata uses these `relation.completeness` values:
+
+- `empty_cache`: no cached rows exist for the chat.
+- `outside_cached_range`: the requested window is wholly before or after the local cache.
+- `partial_cached_range`: the request overlaps the local cache but may omit older or newer uncached rows.
+- `within_cached_range`: the requested window is inside the local cache range.
+- `no_matching_message_ids`: ID filters are impossible, such as `after_id >= before_id`.
+
+When a read/context result returns zero rows, `empty_reason` is one of `cache_empty`,
+`requested_before_cached_range`, `requested_after_cached_range`, `filters_exclude_all_message_ids`,
+`no_cached_rows_in_requested_range`, or `no_cached_rows_in_partial_cached_range`.
+
 ## Write Tools
 
 - `preview_message`: validate text length, bytes, formatting warnings, target chat, and optional reply target without sending. Returns a short-lived `approval_id` for the exact previewed payload.
