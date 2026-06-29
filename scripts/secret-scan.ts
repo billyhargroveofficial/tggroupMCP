@@ -1,12 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 type SecretPattern = {
   name: string;
   regex: RegExp;
 };
 
-const patterns: SecretPattern[] = [
+export type SecretFinding = { file: string; line: number; pattern: string };
+
+export const patterns: SecretPattern[] = [
   {
     name: "OpenAI-compatible API key",
     regex: /\b(?:OPENAI_API_KEY|TELEGRAM_EMBEDDINGS_API_KEY)\s*[:=]\s*['"]?sk-[A-Za-z0-9_-]{20,}/i,
@@ -25,30 +28,29 @@ const patterns: SecretPattern[] = [
   },
 ];
 
-const git = spawnSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
-  encoding: "buffer",
-});
+export function listGitScannableFiles(): string[] {
+  const git = spawnSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+    encoding: "buffer",
+  });
 
-if (git.status !== 0) {
-  process.stderr.write(git.stderr);
-  process.exit(git.status ?? 1);
+  if (git.status !== 0) {
+    process.stderr.write(git.stderr);
+    process.exit(git.status ?? 1);
+  }
+
+  return git.stdout
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean)
+    .filter(isScannableFile);
 }
 
-const files = git.stdout
-  .toString("utf8")
-  .split("\0")
-  .filter(Boolean)
-  .filter((file) => !file.endsWith(".png") && !file.endsWith(".jpg") && !file.endsWith(".jpeg") && !file.endsWith(".gif"));
+export function isScannableFile(file: string): boolean {
+  return !file.endsWith(".png") && !file.endsWith(".jpg") && !file.endsWith(".jpeg") && !file.endsWith(".gif");
+}
 
-const findings: Array<{ file: string; line: number; pattern: string }> = [];
-
-for (const file of files) {
-  let text: string;
-  try {
-    text = readFileSync(file, "utf8");
-  } catch {
-    continue;
-  }
+export function scanSecretText(file: string, text: string): SecretFinding[] {
+  const findings: SecretFinding[] = [];
   const lines = text.split(/\r?\n/);
   for (const [index, line] of lines.entries()) {
     for (const pattern of patterns) {
@@ -57,24 +59,55 @@ for (const file of files) {
       }
     }
   }
+  return findings;
 }
 
-if (findings.length > 0) {
-  console.error("Potential secrets found. Values are intentionally redacted:");
-  for (const finding of findings) {
-    console.error(`${finding.file}:${finding.line} ${finding.pattern}`);
+export function scanSecretFiles(files: string[]): SecretFinding[] {
+  const findings: SecretFinding[] = [];
+  for (const file of files) {
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    findings.push(...scanSecretText(file, text));
   }
-  process.exit(1);
+  return findings;
 }
 
-console.log(
-  JSON.stringify(
-    {
-      ok: true,
-      scannedFiles: files.length,
-      patterns: patterns.map((pattern) => pattern.name),
-    },
-    null,
-    2,
-  ),
-);
+export function formatSecretFindings(findings: SecretFinding[]): string {
+  const lines = ["Potential secrets found. Values are intentionally redacted:"];
+  for (const finding of findings) {
+    lines.push(`${finding.file}:${finding.line} ${finding.pattern}`);
+  }
+  return lines.join("\n");
+}
+
+export function secretScanSummary(files = listGitScannableFiles()): {
+  ok: true;
+  scannedFiles: number;
+  patterns: string[];
+} {
+  return {
+    ok: true,
+    scannedFiles: files.length,
+    patterns: patterns.map((pattern) => pattern.name),
+  };
+}
+
+function main(): void {
+  const files = listGitScannableFiles();
+  const findings = scanSecretFiles(files);
+
+  if (findings.length > 0) {
+    console.error(formatSecretFindings(findings));
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(secretScanSummary(files), null, 2));
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

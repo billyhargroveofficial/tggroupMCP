@@ -1017,7 +1017,25 @@ Important operating rule:
 
 ## P3 - Test And Hygiene Follow-Ups
 
-- [ ] 26. Add secret-scan regression tests.
+- [x] 26. Add secret-scan regression tests.
+
+  Status 2026-06-29: Completed. `scripts/secret-scan.ts` now exposes importable scanner helpers while preserving the
+  CLI behavior. Regression tests create temporary synthetic fixture files for all supported secret classes
+  (OpenAI-compatible keys, Telegram API hashes, Telegram StringSession values, and private key blocks), assert exact
+  file/line/pattern findings, and verify formatted reports omit the secret values themselves. Synthetic secret values
+  are assembled at test runtime so tracked source files do not contain scanner-matching secrets, and `npm run
+  secret-scan` remains green.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/secret-scan.test.ts --test-reporter=spec`
+  - `npm run secret-scan`
+  - `npm run check`
+  - `npm run build`
+  - `npm test` (111/111)
+  - `npm run smoke:mcp`
+  - `npm run status`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   CI runs `npm run secret-scan`, but there are no fixture tests proving detection for supported secret classes.
