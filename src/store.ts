@@ -79,6 +79,14 @@ export type StoredEmbeddingChunk = {
 };
 
 export type SendOutboxStatus = "queued" | "sending" | "sent" | "failed" | "expired";
+export type SendStartupReconciliation = {
+  expiredQueued: number;
+  markedUnknownDelivery: number;
+};
+
+const RESTART_EXPIRED_SEND_ERROR = "Queued send abandoned by process restart before execution.";
+const UNKNOWN_DELIVERY_AFTER_RESTART_ERROR =
+  "Send was in-flight during process restart; Telegram delivery state is unknown and automatic retry is refused.";
 
 export type StoredSendOutboxItem = {
   id: string;
@@ -842,6 +850,13 @@ export class MessageStore {
       this.expireStaleSendsLocked(params.nowMs);
       const existing = params.dedupeKey == null ? undefined : this.getSendByDedupeKeyLocked(params.dedupeKey);
       if (existing) {
+        if (isUnknownDeliveryAfterRestart(existing)) {
+          throw new ToolError({
+            category: "internal",
+            retryable: false,
+            message: "Previous send with this dedupe_key has unknown Telegram delivery state after process restart; refusing automatic retry.",
+          });
+        }
         if (existing.payloadHash !== params.payloadHash) {
           throw new ToolError({
             category: "rate_limit",
@@ -965,6 +980,33 @@ export class MessageStore {
 
   getSendOutboxByDedupeKey(dedupeKey: string): StoredSendOutboxItem | undefined {
     return this.getSendByDedupeKeyLocked(dedupeKey);
+  }
+
+  reconcileActiveSendsOnStartup(nowMs = Date.now()): SendStartupReconciliation {
+    return this.immediateTransaction("reconcileActiveSendsOnStartup", () => {
+      const queued = this.db
+        .prepare(
+          `UPDATE send_outbox
+           SET status = 'expired',
+               error = COALESCE(error, ?),
+               updated_at_ms = ?
+           WHERE status = 'queued'`,
+        )
+        .run(RESTART_EXPIRED_SEND_ERROR, nowMs);
+      const sending = this.db
+        .prepare(
+          `UPDATE send_outbox
+           SET status = 'failed',
+               error = ?,
+               updated_at_ms = ?
+           WHERE status = 'sending'`,
+        )
+        .run(UNKNOWN_DELIVERY_AFTER_RESTART_ERROR, nowMs);
+      return {
+        expiredQueued: Number(queued.changes ?? 0),
+        markedUnknownDelivery: Number(sending.changes ?? 0),
+      };
+    });
   }
 
   startHistoryJob(chatId: string, direction: "recent" | "backfill" | "manual", targetCount: number): string {
@@ -1868,6 +1910,10 @@ function rowToSendOutboxItem(row: Record<string, unknown>): StoredSendOutboxItem
     sentAtMs: row.sent_at_ms == null ? undefined : Number(row.sent_at_ms),
     expiresAtMs: Number(row.expires_at_ms),
   };
+}
+
+function isUnknownDeliveryAfterRestart(item: StoredSendOutboxItem): boolean {
+  return item.error === UNKNOWN_DELIVERY_AFTER_RESTART_ERROR;
 }
 
 function escapeFtsQuery(query: string): string {

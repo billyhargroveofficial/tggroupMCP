@@ -37,6 +37,7 @@ export class TelegramTools {
     private readonly telegram: TelegramService,
     private readonly store: MessageStore,
   ) {
+    this.store.reconcileActiveSendsOnStartup();
     this.throttler = new SendThrottler(config, store);
     this.syncer = new HistorySyncer(config, telegram, store);
     this.vectorRag = new VectorRag(config, store);

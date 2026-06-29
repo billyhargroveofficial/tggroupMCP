@@ -383,6 +383,62 @@ test("caller-supplied user_key cannot bypass persisted cooldown", async () => {
   assert.equal(telegram.sends.length, 1);
 });
 
+test("fresh tools reconcile active outbox rows without changing terminal rows", (t) => {
+  const dbPath = tempDbPath(t);
+  const seedStore = new MessageStore(dbPath);
+  seedSend(seedStore, "queued", "queued/restart");
+  seedSend(seedStore, "sending", "sending/restart");
+  seedSend(seedStore, "failed", "failed/restart", "original failure");
+  seedSend(seedStore, "expired", "expired/restart", "already expired");
+  seedSend(seedStore, "sent", "sent/restart");
+
+  const { store } = makeTools(new FakeTelegram(), { dbPath });
+
+  const queued = store.getSendOutboxByDedupeKey("queued/restart");
+  assert.equal(queued?.status, "expired");
+  assert.match(queued?.error ?? "", /abandoned by process restart/);
+
+  const sending = store.getSendOutboxByDedupeKey("sending/restart");
+  assert.equal(sending?.status, "failed");
+  assert.match(sending?.error ?? "", /delivery state is unknown/);
+
+  assert.equal(store.getSendOutboxByDedupeKey("failed/restart")?.status, "failed");
+  assert.equal(store.getSendOutboxByDedupeKey("failed/restart")?.error, "original failure");
+  assert.equal(store.getSendOutboxByDedupeKey("expired/restart")?.status, "expired");
+  assert.equal(store.getSendOutboxByDedupeKey("expired/restart")?.error, "already expired");
+  assert.equal(store.getSendOutboxByDedupeKey("sent/restart")?.status, "sent");
+});
+
+test("ambiguous in-flight send is not retried after restart", async (t) => {
+  const dbPath = tempDbPath(t);
+  const seedStore = new MessageStore(dbPath);
+  seedSend(seedStore, "sending", "ambiguous/restart");
+  const telegram = new FakeTelegram();
+  const { tools, store } = makeTools(telegram, {
+    dbPath,
+    throttle: { userCooldownMs: 0 },
+  });
+
+  const reconciled = store.getSendOutboxByDedupeKey("ambiguous/restart");
+  assert.equal(reconciled?.status, "failed");
+  assert.match(reconciled?.error ?? "", /delivery state is unknown/);
+
+  const preview = await callTool(tools, "preview_message", {
+    text: "ambiguous send",
+  });
+  const retried = await callTool(tools, "send_message", {
+    text: "ambiguous send",
+    dry_run: false,
+    approval_id: preview.approval_id,
+    dedupe_key: "ambiguous/restart",
+  });
+
+  assert.equal(retried.ok, false);
+  assert.equal((retried.error as { category: string }).category, "internal");
+  assert.match((retried.error as { message: string }).message, /unknown Telegram delivery state/);
+  assert.equal(telegram.sends.length, 0);
+});
+
 function makeTools(
   telegram: FakeTelegram,
   options: {
@@ -472,4 +528,35 @@ function tempDbPath(t: { after(fn: () => void): void }): string {
   const dir = mkdtempSync(join(tmpdir(), "telegram-parilka-mcp-test-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return join(dir, "messages.sqlite");
+}
+
+function seedSend(
+  store: MessageStore,
+  status: "queued" | "sending" | "sent" | "failed" | "expired",
+  dedupeKey: string,
+  error?: string,
+): void {
+  const reservation = store.reserveSend({
+    outboxId: `seed/${dedupeKey}`,
+    dedupeKey,
+    payloadHash: "payload/hash",
+    chatId: "-1001",
+    userKey: "mcp-server",
+    nowMs: 1000,
+    maxAgeMs: 60_000,
+    userCooldownMs: 0,
+    maxPendingPerUserPerChat: 100,
+    maxQueuePerChat: 100,
+  });
+  assert.equal(reservation.kind, "queued");
+  if (status === "sending" || status === "sent") {
+    store.markSendSending(reservation.outboxId, 1001);
+  }
+  if (status === "sent") {
+    store.markSendSent(reservation.outboxId, 9001, 1002);
+  } else if (status === "failed") {
+    store.markSendFailed(reservation.outboxId, error ?? "failed", 1002);
+  } else if (status === "expired") {
+    store.markSendExpired(reservation.outboxId, error ?? "expired", 1002);
+  }
 }

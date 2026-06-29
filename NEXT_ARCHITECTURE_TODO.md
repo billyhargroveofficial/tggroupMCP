@@ -127,7 +127,18 @@ Important operating rule:
   - `send_outbox`, `send_throttle_state`, and indexes exist after migration.
   - `npm run status` works on an existing live DB after migration.
 
-- [ ] 4. Reconcile active send outbox rows on startup.
+- [x] 4. Reconcile active send outbox rows on startup.
+
+  Status 2026-06-29: Completed. `TelegramTools` now reconciles durable send state on startup before accepting new
+  sends. Persisted `queued` rows are marked `expired` because no in-memory worker exists after restart. Persisted
+  `sending` rows are marked `failed` with an explicit unknown-delivery error; retries with the same `dedupe_key` are
+  refused before payload-hash or queue checks so crash-after-send-before-audit states cannot auto-post duplicates.
+  Terminal `sent`, `failed`, and `expired` rows are left unchanged.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/send-safety.test.ts --test-reporter=spec`
+  - `npm run check`
 
   Problem:
   The executable send queue lives in memory, while SQLite stores only send metadata. After a restart, persisted `queued` or `sending` rows have no worker. A crash after Telegram accepts a send but before `markSendSent()` can also leave ambiguous state that may later be retried and duplicate a live post.
