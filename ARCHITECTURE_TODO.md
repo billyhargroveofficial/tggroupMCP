@@ -662,6 +662,14 @@ Acceptance criteria:
 
 ### 21. Add automated tests and CI
 
+Status 2026-06-29: Completed. The repo now has `npm test` with no-network coverage for config validation, store migrations and FTS rebuilds, durable send throttling/outbox behavior, tool validation/response contracts, sync cursor/failure logic, SQLite writer retry, and vector helper behavior. `npm run check` type-checks both `src/**/*.ts` and repository scripts. `npm run smoke:mcp` starts the MCP server over stdio with sanitized env, a temp SQLite DB, live sends disabled, dry-run enabled, Telegram/OpenAI credentials blanked, then verifies initialize, `tools/list`, and `get_config`. GitHub Actions CI runs `npm ci`, `npm run check`, `npm test`, and `npm run smoke:mcp` on pushes to `main` and pull requests.
+
+Verification 2026-06-29:
+
+- `npm run check`
+- `npm test -- --test-reporter=spec` (59 passed)
+- `npm run smoke:mcp`
+
 Problem:
 There is no `npm test`, no CI workflow, no lint, and no automated smoke script.
 

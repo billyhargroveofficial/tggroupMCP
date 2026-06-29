@@ -12,8 +12,9 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
     "test": "node --test --import tsx tests/*.test.ts",
+    "smoke:mcp": "tsx scripts/smoke-mcp.ts",
     "dev": "tsx src/index.ts",
     "generate-session": "tsx src/generate-session.ts",
     "embed-once": "tsx src/embed-index.ts",
