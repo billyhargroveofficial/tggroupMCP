@@ -7,7 +7,7 @@ import { gramMessageToStored, MessageStore, type ChatCacheStatus, type StoredMes
 import { type ChatInfo, TelegramService } from "./telegram-client.js";
 import { SendThrottler } from "./throttler.js";
 import { HistorySyncer } from "./sync-engine.js";
-import { VectorRag } from "./vector-rag.js";
+import { embeddingEstimateRequiresConfirmation, VectorRag } from "./vector-rag.js";
 import type { SyncOnceResult, SyncResult } from "./sync-engine.js";
 
 type ToolDef = {
@@ -529,13 +529,12 @@ export class TelegramTools {
       afterMessageId: args.after_message_id,
       rebuild: args.rebuild,
     });
-    const budgetRequiresConfirmation =
-      (estimate.budget.truncatedByChunkBudget || estimate.budget.truncatedByCharBudget) && !args.confirm_estimate;
-    if (args.estimate_only || (estimate.requiresConfirmation && !args.confirm_estimate) || budgetRequiresConfirmation) {
+    const requiresConfirmation = embeddingEstimateRequiresConfirmation(estimate, args.confirm_estimate);
+    if (args.estimate_only || requiresConfirmation) {
       return ok({
         chat,
         estimate,
-        requires_confirmation: (estimate.requiresConfirmation && !args.confirm_estimate) || budgetRequiresConfirmation,
+        requires_confirmation: requiresConfirmation,
         result: null,
       });
     }

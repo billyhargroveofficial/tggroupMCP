@@ -67,9 +67,12 @@ npm run embed-once -- --limit-chunks 1000 --estimate-only
 npm run embed-once -- --limit-chunks 1000 --confirm-estimate
 ```
 
-The regular sync daemon indexes new chunks only when embeddings are explicitly enabled and configured. On the first
-indexing run it logs the estimate and skips API calls until you run a confirmed manual index. `search_messages` returns
-keyword, vector, and hybrid candidates; `semantic_search_messages` returns only cosine-ranked chunks.
+The CLI prints `status:"estimate_only"`, `status:"requires_confirmation"`, or `status:"indexed"` so operators can tell
+whether it only estimated or actually called the embeddings API. Confirmation is required for first runs and for
+chunk/character budget truncation. The regular sync daemon indexes new chunks only when embeddings are explicitly
+enabled and configured. On the first indexing run it logs the estimate and skips API calls until you run a confirmed
+manual index. `search_messages` returns keyword, vector, and hybrid candidates; `semantic_search_messages` returns only
+cosine-ranked chunks.
 
 Vector search uses an exact in-process cosine scan capped by `TELEGRAM_EMBEDDINGS_VECTOR_CANDIDATE_LIMIT` (default
 20,000 chunks). If a query would exceed the cap, narrow it with `before_id`/`after_id` or raise the cap only after a

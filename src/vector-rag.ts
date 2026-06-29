@@ -57,6 +57,16 @@ export type EmbeddingIndexEstimate = {
   privacy: string;
 };
 
+export function embeddingEstimateRequiresConfirmation(
+  estimate: Pick<EmbeddingIndexEstimate, "requiresConfirmation" | "budget">,
+  confirmed: boolean,
+): boolean {
+  return (
+    !confirmed &&
+    (estimate.requiresConfirmation || estimate.budget.truncatedByChunkBudget || estimate.budget.truncatedByCharBudget)
+  );
+}
+
 export type VectorSearchHit = {
   rank: number;
   score: number;
@@ -110,12 +120,11 @@ export class VectorRag {
   }): Promise<EmbeddingIndexResult> {
     this.embeddings.assertConfigured();
     const estimate = this.estimateIndexCachedMessages(params);
-    if (estimate.requiresConfirmation && !params.confirmFirstRun) {
+    if (embeddingEstimateRequiresConfirmation(estimate, params.confirmFirstRun ?? false)) {
       throw new ToolError({
         category: "permission",
         retryable: false,
-        message:
-          "First embedding index requires explicit confirmation. Review the estimate and retry with confirm_estimate:true.",
+        message: "Embedding index requires explicit confirmation. Review the estimate and retry with confirm_estimate:true or --confirm-estimate.",
       });
     }
 

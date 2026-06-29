@@ -131,8 +131,10 @@ npm run embed-once -- --limit-chunks 1000 --confirm-estimate
 ```
 
 The estimate prints provider, model, dimensions, namespace, chat, estimated chunks/messages/chars, and budget flags
-without calling the embeddings API. Run the confirmed command only after reviewing that privacy/cost surface. On the
-first daemon indexing run, the daemon logs the estimate and skips API calls until a confirmed manual index exists.
+without calling the embeddings API. CLI output includes `status:"estimate_only"`, `status:"requires_confirmation"`,
+or `status:"indexed"`. Run the confirmed command only after reviewing that privacy/cost surface; confirmation is
+required for first runs and when chunk/character budgets truncate the requested work. On the first daemon indexing run,
+the daemon logs the estimate and skips API calls until a confirmed manual index exists.
 
 Search with `search_messages` for keyword/vector/hybrid results, or `semantic_search_messages` for vector-only chunks.
 

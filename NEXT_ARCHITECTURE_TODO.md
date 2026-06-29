@@ -894,7 +894,27 @@ Important operating rule:
   - A 500k-message zero-embedding DB returns status/estimate within documented latency and memory bounds.
   - Coverage stats remain accurate or clearly labeled as sampled.
 
-- [ ] 23. Apply MCP embedding budget confirmation rules to the CLI.
+- [x] 23. Apply MCP embedding budget confirmation rules to the CLI.
+
+  Status 2026-06-29: Completed. MCP and CLI now share `embeddingEstimateRequiresConfirmation()`, so first-run,
+  chunk-budget truncation, and character-budget truncation all require explicit confirmation before embedding API
+  calls. `embed-index` reports `status:"estimate_only"`, `status:"requires_confirmation"`, or `status:"indexed"`
+  to distinguish estimates from actual indexing. CLI tests run the real `src/embed-index.ts` child process with a
+  seeded SQLite DB, proving first-run estimates avoid provider calls, budget-truncated estimates stop before provider
+  calls, and `--confirm-estimate` indexes through a local fake embeddings server. README and the skill runbook document
+  the status field and budget-confirmation behavior, and the installed Codex skill was synchronized.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/embeddings-opt-in.test.ts tests/vector-rag.test.ts tests/tools-response.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run build`
+  - `npm test` (108/108)
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run status`
+  - `npm run smoke:mcp:wrapper`
+  - `diff -qr /root/.codex/skills/telegram-parilka-mcp codex-skill/telegram-parilka-mcp`
 
   Problem:
   The MCP `index_embeddings` tool requires confirmation when budget truncation happens, but `embed-index.ts` only handles first-run confirmation.

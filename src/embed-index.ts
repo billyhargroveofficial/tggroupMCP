@@ -2,7 +2,7 @@
 import { loadConfig } from "./config.js";
 import { stringify } from "./json.js";
 import { MessageStore } from "./store.js";
-import { VectorRag } from "./vector-rag.js";
+import { embeddingEstimateRequiresConfirmation, VectorRag } from "./vector-rag.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -16,12 +16,14 @@ async function main(): Promise<void> {
     afterMessageId: args.afterMessageId,
     rebuild: args.rebuild,
   });
-  if (args.estimateOnly || (estimate.requiresConfirmation && !args.confirmEstimate)) {
+  const requiresConfirmation = embeddingEstimateRequiresConfirmation(estimate, args.confirmEstimate ?? false);
+  if (args.estimateOnly || requiresConfirmation) {
     console.log(
       stringify({
         ok: true,
+        status: args.estimateOnly ? "estimate_only" : "requires_confirmation",
         estimate,
-        requires_confirmation: estimate.requiresConfirmation && !args.confirmEstimate,
+        requires_confirmation: requiresConfirmation,
         result: null,
       }),
     );
@@ -35,7 +37,7 @@ async function main(): Promise<void> {
     rebuild: args.rebuild,
     confirmFirstRun: args.confirmEstimate,
   });
-  console.log(stringify({ ok: true, result }));
+  console.log(stringify({ ok: true, status: "indexed", estimate, requires_confirmation: false, result }));
 }
 
 function parseArgs(argv: string[]): {
