@@ -314,6 +314,13 @@ Acceptance criteria:
 
 ### 10. Make manual offset sync non-mutating by default
 
+Status 2026-06-29: Completed. `sync_history` now accepts `commit_cursor`; when `offset_id` is provided, cursor commits default to false and the sync state is updated as `mode:"manual"` without advancing daemon oldest/newest/backfill cursor fields. Normal daemon backfill without `offset_id` still advances the cursor. Explicit `commit_cursor:true` is validated against the current daemon backfill cursor before any history job is created.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+
 Problem:
 Manual `sync_history({ mode:"backfill", offset_id })` uses the same cursor mutation path as daemon backfill. A manual jump can skip an unfilled range.
 

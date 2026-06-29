@@ -74,6 +74,7 @@ export class TelegramTools {
           limit: numberProp("Messages to fetch. Max TELEGRAM_MAX_SYNC_LIMIT.", 1, 500000),
           batch_size: numberProp("Telegram page size.", 1, 1000),
           offset_id: numberProp("Start older-than this message ID. 0 means latest.", 0),
+          commit_cursor: boolProp("Allow an explicit offset_id backfill to advance daemon cursor state."),
           reset_backfill_exhausted: boolProp("Clear backfill exhausted state and allow backfill to run again."),
         }),
       },
@@ -262,6 +263,7 @@ export class TelegramTools {
         limit: limitSchema.max(this.config.sync.maxSyncLimit).default(1000),
         batch_size: limitSchema.max(1000).default(this.config.sync.batchSize),
         offset_id: z.number().int().nonnegative().optional(),
+        commit_cursor: z.boolean().optional(),
         reset_backfill_exhausted: z.boolean().default(false),
       })
       .parse(rawArgs ?? {});
@@ -283,6 +285,7 @@ export class TelegramTools {
       batchSize: args.batch_size,
       offsetId: args.offset_id,
       resetBackfillExhausted: args.reset_backfill_exhausted,
+      commitCursor: args.commit_cursor ?? args.offset_id == null,
     });
     return ok({ result, stats: this.store.getStats(result.chat.chatId) });
   }

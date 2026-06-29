@@ -1,5 +1,5 @@
 import type { AppConfig } from "./config.js";
-import { normalizeError } from "./errors.js";
+import { normalizeError, ToolError } from "./errors.js";
 import { gramMessageToStored, MessageStore, type StoredMessage } from "./store.js";
 import { TelegramService } from "./telegram-client.js";
 
@@ -76,6 +76,7 @@ export class HistorySyncer {
     batchSize?: number;
     offsetId?: number;
     resetBackfillExhausted?: boolean;
+    commitCursor?: boolean;
   }): Promise<SyncResult> {
     const resolved = await this.telegram.resolveChat(params.chat);
     const chat = resolved.info;
@@ -109,15 +110,25 @@ export class HistorySyncer {
       };
     }
 
-    const jobId = this.store.startHistoryJob(chat.chatId, params.mode, target);
-
     const backfillOffsets = [currentState?.nextBackfillOffsetId, currentState?.oldestMessageId].filter(
       (value): value is number => value != null && value > 0,
     );
     let offsetId =
       params.offsetId ?? (params.mode === "backfill" && backfillOffsets.length > 0 ? Math.min(...backfillOffsets) : 0);
     const minId = params.mode === "recent" ? currentState?.newestMessageId : undefined;
-    const shouldAdvanceBackfillPointer = params.mode === "backfill" || currentState?.nextBackfillOffsetId == null;
+    const hasManualOffset = params.mode === "backfill" && params.offsetId != null;
+    const shouldAdvanceBackfillPointer = params.mode === "backfill" && (params.commitCursor ?? !hasManualOffset);
+    if (hasManualOffset && params.commitCursor) {
+      const currentCursor = backfillOffsets.length > 0 ? Math.min(...backfillOffsets) : undefined;
+      if (currentCursor != null && params.offsetId !== currentCursor) {
+        throw new ToolError({
+          category: "internal",
+          retryable: false,
+          message: `commit_cursor:true requires offset_id to match current backfill cursor ${currentCursor}.`,
+        });
+      }
+    }
+    const jobId = this.store.startHistoryJob(chat.chatId, params.mode, target);
     let fetched = 0;
     let saved = 0;
     let batches = 0;
@@ -226,11 +237,11 @@ export class HistorySyncer {
       const cachedCount = this.store.countMessages(chat.chatId);
 
       this.store.updateSyncState(chat, {
-        oldestMessageId,
-        newestMessageId,
+        oldestMessageId: shouldAdvanceBackfillPointer || params.mode === "recent" ? oldestMessageId : undefined,
+        newestMessageId: shouldAdvanceBackfillPointer || params.mode === "recent" ? newestMessageId : undefined,
         nextBackfillOffsetId: shouldAdvanceBackfillPointer && offsetId > 0 ? offsetId : undefined,
         syncedCount: cachedCount,
-        mode: params.mode,
+        mode: shouldAdvanceBackfillPointer || params.mode === "recent" ? params.mode : "manual",
         error: null,
       });
       if (params.mode === "backfill") {

@@ -194,6 +194,81 @@ test("resetting backfill exhausted state resumes backfill", async () => {
   assert.equal(telegram.requests.length, 1);
 });
 
+test("manual older offset backfill does not mutate daemon cursor by default", async () => {
+  const store = seededStore(1000);
+  const telegram = new FakeTelegram([398, 399]);
+  const syncer = new HistorySyncer(config(), telegram as unknown as TelegramService, store);
+
+  const result = await syncer.syncDirection({
+    mode: "backfill",
+    limit: 10,
+    batchSize: 5,
+    offsetId: 400,
+  });
+
+  const state = store.getSyncState(CHAT.chatId);
+  assert.equal(result.status, "done");
+  assert.equal(result.fetched, 2);
+  assert.equal(state?.oldestMessageId, 1000);
+  assert.equal(state?.nextBackfillOffsetId, undefined);
+});
+
+test("manual newer overlap backfill does not mutate daemon cursor by default", async () => {
+  const store = seededStore(1000);
+  const telegram = new FakeTelegram([999]);
+  const syncer = new HistorySyncer(config(), telegram as unknown as TelegramService, store);
+
+  const result = await syncer.syncDirection({
+    mode: "backfill",
+    limit: 10,
+    batchSize: 5,
+    offsetId: 1001,
+  });
+
+  const state = store.getSyncState(CHAT.chatId);
+  assert.equal(result.status, "done");
+  assert.equal(result.fetched, 1);
+  assert.equal(state?.oldestMessageId, 1000);
+  assert.equal(state?.nextBackfillOffsetId, undefined);
+});
+
+test("normal daemon backfill advances cursor", async () => {
+  const store = seededStore(1000);
+  const telegram = new FakeTelegram([998, 999]);
+  const syncer = new HistorySyncer(config(), telegram as unknown as TelegramService, store);
+
+  const result = await syncer.syncDirection({
+    mode: "backfill",
+    limit: 10,
+    batchSize: 5,
+  });
+
+  const state = store.getSyncState(CHAT.chatId);
+  assert.equal(result.status, "done");
+  assert.equal(result.fetched, 2);
+  assert.equal(state?.oldestMessageId, 998);
+  assert.equal(state?.nextBackfillOffsetId, 998);
+});
+
+test("explicit cursor commits must match the current daemon cursor", async () => {
+  const store = seededStore(1000);
+  const telegram = new FakeTelegram([899]);
+  const syncer = new HistorySyncer(config(), telegram as unknown as TelegramService, store);
+
+  await assert.rejects(
+    () =>
+      syncer.syncDirection({
+        mode: "backfill",
+        limit: 10,
+        batchSize: 5,
+        offsetId: 900,
+        commitCursor: true,
+      }),
+    /commit_cursor:true requires offset_id to match current backfill cursor 1000/,
+  );
+  assert.equal(telegram.requests.length, 0);
+});
+
 function seededStore(newestMessageId: number): MessageStore {
   const store = new MessageStore(":memory:");
   store.upsertMessages(CHAT, [
