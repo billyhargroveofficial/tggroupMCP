@@ -734,7 +734,24 @@ Important operating rule:
   - An agent following the skill can inspect cache freshness without unnecessary Telegram network calls.
   - Operators can tell whether they estimated or actually indexed embeddings.
 
-- [ ] 19. Share env loading for session generation.
+- [x] 19. Share env loading for session generation.
+
+  Status 2026-06-29: Completed. `generate-session` now imports the shared config module instead of `dotenv/config`,
+  so it uses the same `TELEGRAM_SHARED_ENV_PATH` then `TELEGRAM_ENV_PATH` dotenv loading and real-process-env
+  precedence as the runtime server. Telegram auth fields are centralized in `loadTelegramAuthConfig()`, and session
+  generation requires positive `TELEGRAM_API_ID` plus `TELEGRAM_API_HASH` before any Telegram auth prompt/network flow.
+  It also reuses configured `TELEGRAM_CONNECTION_RETRIES`.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/config-validation.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run print-config`
+  - `npm run build`
+  - `npm test`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper` (first parallel run raced with `npm run build` and failed stale-entrypoint preflight as expected; rerun after build passed)
+  - `npm run secret-scan`
 
   Problem:
   Runtime config uses the new shared/local dotenv precedence, but `generate-session` uses plain `dotenv/config` and its own parsing.

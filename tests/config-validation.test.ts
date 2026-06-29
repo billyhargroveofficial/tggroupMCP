@@ -177,6 +177,103 @@ test("configured dotenv files are parsed without shell execution", () => {
   }
 });
 
+test("session generation uses runtime dotenv precedence for Telegram auth", () => {
+  const dir = mkdtempSync(join(tmpdir(), "telegram-session-env-test-"));
+  const sharedEnv = join(dir, "shared.env");
+  const localEnv = join(dir, "local.env");
+  try {
+    writeFileSync(
+      sharedEnv,
+      [
+        "TELEGRAM_API_ID=111",
+        "TELEGRAM_API_HASH=shared-hash",
+        "TELEGRAM_PHONE=+111",
+        "TELEGRAM_SESSION=shared-session",
+        "TELEGRAM_DEFAULT_CHAT_ID=-100shared",
+        "TELEGRAM_ALLOWED_CHAT_IDS=-100shared",
+        "TELEGRAM_CONNECTION_RETRIES=7",
+      ].join("\n"),
+    );
+    writeFileSync(
+      localEnv,
+      [
+        "TELEGRAM_API_ID=222",
+        "TELEGRAM_API_HASH=local-hash",
+        "TELEGRAM_PHONE=+222",
+        "TELEGRAM_SESSION_STRING_PERSONAL=personal-session",
+        "TELEGRAM_DEFAULT_CHAT_ID=-100local",
+        "TELEGRAM_ALLOWED_CHAT_IDS=-100local",
+        "TELEGRAM_CONNECTION_RETRIES=8",
+        "TELEGRAM_REQUIRE_ALLOWLIST=false",
+      ].join("\n"),
+    );
+
+    const probe = [
+      'import { loadConfig, loadTelegramAuthConfig } from "./src/config.js";',
+      "const runtime = loadConfig().telegram;",
+      "const session = loadTelegramAuthConfig({ requireApiCredentials: true });",
+      "console.log(JSON.stringify({ runtime, session }));",
+    ].join("\n");
+    const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", probe], {
+      cwd: process.cwd(),
+      env: {
+        HOME: dir,
+        PATH: process.env.PATH ?? "",
+        TELEGRAM_SHARED_ENV_PATH: sharedEnv,
+        TELEGRAM_ENV_PATH: localEnv,
+        TELEGRAM_DB_PATH: join(dir, "messages.sqlite"),
+        TELEGRAM_API_ID: "333",
+        TELEGRAM_SESSION: "real-session",
+      },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout) as { runtime: unknown; session: unknown };
+    assert.deepEqual(parsed.session, parsed.runtime);
+    assert.deepEqual(parsed.session, {
+      apiId: 333,
+      apiHash: "local-hash",
+      session: "real-session",
+      phone: "+222",
+      defaultChatId: "-100local",
+      allowedChatIds: ["-100local"],
+      requireAllowlistedChat: false,
+      connectionRetries: 8,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("generate-session fails clearly before auth when API ID is invalid", () => {
+  const dir = mkdtempSync(join(tmpdir(), "telegram-generate-session-config-test-"));
+  try {
+    for (const [raw, pattern] of [
+      ["0", /TELEGRAM_API_ID must be a positive integer for session generation/],
+      ["bogus", /TELEGRAM_API_ID must be an integer between 0 and 2147483647/],
+    ] as const) {
+      const result = spawnSync(process.execPath, ["--import", "tsx", "src/generate-session.ts"], {
+        cwd: process.cwd(),
+        env: {
+          HOME: dir,
+          PATH: process.env.PATH ?? "",
+          TELEGRAM_SHARED_ENV_PATH: join(dir, "missing-shared.env"),
+          TELEGRAM_ENV_PATH: join(dir, "missing-local.env"),
+          TELEGRAM_API_ID: raw,
+          TELEGRAM_API_HASH: "hash",
+        },
+        encoding: "utf8",
+      });
+
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, pattern);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("copied env example keeps live sends hard-disabled", () => {
   const dir = mkdtempSync(join(tmpdir(), "telegram-config-example-test-"));
   try {

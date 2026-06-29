@@ -213,6 +213,8 @@ export type AppConfig = {
   };
 };
 
+export type TelegramAuthConfig = AppConfig["telegram"];
+
 export function expandPath(path: string): string {
   if (path === "~") {
     return homedir();
@@ -224,8 +226,7 @@ export function expandPath(path: string): string {
 }
 
 export function loadConfig(): AppConfig {
-  const defaultChatId = process.env.TELEGRAM_DEFAULT_CHAT_ID?.trim() || DEFAULT_PARILKA_CHAT_ID;
-  const allowed = csv(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
+  const telegram = loadTelegramAuthConfig();
   const dbPath = expandPath(process.env.TELEGRAM_DB_PATH || "~/.telegram-parilka-mcp/messages.sqlite");
   const embeddingApiKey =
     process.env.TELEGRAM_EMBEDDINGS_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim() || "";
@@ -233,19 +234,7 @@ export function loadConfig(): AppConfig {
 
   const config: AppConfig = {
     telegram: {
-      apiId: intFromEnv("TELEGRAM_API_ID"),
-      apiHash: process.env.TELEGRAM_API_HASH?.trim() || "",
-      session:
-        process.env.TELEGRAM_SESSION?.trim() ||
-        process.env.TELEGRAM_SESSION_STRING_PERSONAL?.trim() ||
-        process.env.TELEGRAM_SESSION_STRING_WIFE?.trim() ||
-        process.env.SESSION?.trim() ||
-        "",
-      phone: process.env.TELEGRAM_PHONE?.trim() || "",
-      defaultChatId,
-      allowedChatIds: allowed.length > 0 ? allowed : [defaultChatId],
-      requireAllowlistedChat: boolFromEnv("TELEGRAM_REQUIRE_ALLOWLIST"),
-      connectionRetries: intFromEnv("TELEGRAM_CONNECTION_RETRIES"),
+      ...telegram,
     },
     storage: {
       dbPath,
@@ -301,6 +290,36 @@ export function loadConfig(): AppConfig {
   validateConfig(config);
   mkdirSync(dirname(config.storage.dbPath), { recursive: true });
   return config;
+}
+
+export function loadTelegramAuthConfig(options: { requireApiCredentials?: boolean } = {}): TelegramAuthConfig {
+  const apiId = intFromEnv("TELEGRAM_API_ID");
+  const apiHash = process.env.TELEGRAM_API_HASH?.trim() || "";
+  if (options.requireApiCredentials) {
+    if (apiId <= 0) {
+      throw new Error("TELEGRAM_API_ID must be a positive integer for session generation.");
+    }
+    if (!apiHash) {
+      throw new Error("TELEGRAM_API_HASH is required for session generation.");
+    }
+  }
+  const defaultChatId = process.env.TELEGRAM_DEFAULT_CHAT_ID?.trim() || DEFAULT_PARILKA_CHAT_ID;
+  const allowedChatIds = csv(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
+  return {
+    apiId,
+    apiHash,
+    session:
+      process.env.TELEGRAM_SESSION?.trim() ||
+      process.env.TELEGRAM_SESSION_STRING_PERSONAL?.trim() ||
+      process.env.TELEGRAM_SESSION_STRING_WIFE?.trim() ||
+      process.env.SESSION?.trim() ||
+      "",
+    phone: process.env.TELEGRAM_PHONE?.trim() || "",
+    defaultChatId,
+    allowedChatIds: allowedChatIds.length > 0 ? allowedChatIds : [defaultChatId],
+    requireAllowlistedChat: boolFromEnv("TELEGRAM_REQUIRE_ALLOWLIST"),
+    connectionRetries: intFromEnv("TELEGRAM_CONNECTION_RETRIES"),
+  };
 }
 
 function validateConfig(config: AppConfig): void {
