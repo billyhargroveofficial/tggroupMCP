@@ -93,7 +93,19 @@ Important operating rule:
   - Live send requires explicit live env plus a matching approval.
   - Tests prove hard dry-run and `TELEGRAM_SEND_ENABLED=false` win over `TELEGRAM_LIVE_SEND_APPROVAL_BYPASS=true`.
 
-- [ ] 3. Add real migrations for send outbox and throttle tables.
+- [x] 3. Add real migrations for send outbox and throttle tables.
+
+  Status 2026-06-29: Completed. Schema version is now 7 and includes an explicit idempotent migration for
+  `send_outbox`, `send_throttle_state`, `idx_send_outbox_chat_status`, and `idx_send_outbox_user_status`. Existing
+  DBs at version 5 or 6 now receive the durable send/audit schema during startup validation without losing existing
+  chat/message data.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/store-migrations.test.ts --test-reporter=spec`
+  - `npm run status`
+  - live DB schema probe: `PRAGMA user_version` returned `7`; `send_outbox`, `send_throttle_state`, and both send
+    indexes were present
 
   Problem:
   `send_outbox` and `send_throttle_state` are present in the base schema, but existing versioned DBs can skip their creation. A version-5 DB can fail startup validation with missing `send_outbox`.

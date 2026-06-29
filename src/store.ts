@@ -6,7 +6,7 @@ import type { ChatInfo } from "./telegram-client.js";
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
 const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 export type StoredMessage = {
   id?: number;
@@ -1251,6 +1251,10 @@ export class MessageStore {
         this.applyEmbeddingChunkMembershipMigration();
         this.db.exec("PRAGMA user_version = 6");
       }
+      if (currentVersion < 7) {
+        this.applySendOutboxMigration();
+        this.db.exec("PRAGMA user_version = 7");
+      }
       this.validateSchema();
     });
   }
@@ -1524,6 +1528,41 @@ export class MessageStore {
     }
   }
 
+  private applySendOutboxMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS send_outbox (
+        id TEXT PRIMARY KEY,
+        dedupe_key TEXT UNIQUE,
+        payload_hash TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        reply_to_message_id INTEGER,
+        user_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('queued', 'sending', 'sent', 'failed', 'expired')),
+        telegram_message_id INTEGER,
+        error TEXT,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        queued_at_ms INTEGER,
+        sending_at_ms INTEGER,
+        sent_at_ms INTEGER,
+        expires_at_ms INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS send_throttle_state (
+        chat_id TEXT NOT NULL,
+        user_key TEXT NOT NULL,
+        next_allowed_at_ms INTEGER NOT NULL DEFAULT 0,
+        updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY(chat_id, user_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_send_outbox_chat_status
+        ON send_outbox(chat_id, status, expires_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_send_outbox_user_status
+        ON send_outbox(chat_id, user_key, status, expires_at_ms);
+    `);
+  }
+
   private ensureColumn(table: string, column: string, definition: string): void {
     const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[];
     if (!rows.some((row) => row.name === column)) {
@@ -1570,6 +1609,24 @@ export class MessageStore {
     this.assertColumns("messages", ["id", "chat_id", "message_id", "text", "deleted_at", "updated_at"]);
     this.assertColumns("message_embedding_chunks", ["id", "chat_id", "dirty_at", "updated_at"]);
     this.assertColumns("message_embedding_chunk_messages", ["chunk_id", "chat_id", "message_id", "position"]);
+    this.assertColumns("send_outbox", [
+      "id",
+      "dedupe_key",
+      "payload_hash",
+      "chat_id",
+      "reply_to_message_id",
+      "user_key",
+      "status",
+      "telegram_message_id",
+      "error",
+      "created_at_ms",
+      "updated_at_ms",
+      "queued_at_ms",
+      "sending_at_ms",
+      "sent_at_ms",
+      "expires_at_ms",
+    ]);
+    this.assertColumns("send_throttle_state", ["chat_id", "user_key", "next_allowed_at_ms", "updated_at_ms"]);
     this.assertColumns("daemon_status", [
       "service",
       "last_started_at",
