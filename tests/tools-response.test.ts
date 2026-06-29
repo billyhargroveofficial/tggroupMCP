@@ -102,6 +102,7 @@ function config(): AppConfig {
       maxSyncLimit: 500_000,
       floodWaitMaxSleepSec: 10,
       historyWaitTimeSec: 1,
+      historyOperationTimeoutMs: 120_000,
       intervalMs: 60_000,
       recentLimit: 300,
       backfillLimit: 1000,

@@ -37,26 +37,33 @@ async function runDaemon(): Promise<void> {
   while (true) {
     const started = Date.now();
     let errors: NormalizedError[] = [];
+    recordDaemonStarted(store);
     try {
       const result = await syncer.syncOnce();
       errors = syncErrors(result);
-      stopOnPermanentDaemonErrors(errors);
+      if (errors.length > 0) {
+        recordDaemonFailure(store, errors);
+      } else {
+        recordDaemonSuccess(store);
+      }
       const embeddings = await indexEmbeddings(vectorRag, result.chat);
       console.error(
         `sync tick ${stringify({
           recent: summarize(result.recent),
           backfill: summarize(result.backfill),
           embeddings,
+          daemonStatus: store.getDaemonStatus(),
         })}`,
       );
     } catch (error) {
       const normalized = normalizeError(error);
       errors = [normalized];
-      stopOnPermanentDaemonErrors(errors);
-      console.error(`sync tick error ${stringify({ error: normalized })}`);
+      recordDaemonFailure(store, errors);
+      console.error(`sync tick error ${stringify({ error: normalized, daemonStatus: store.getDaemonStatus() })}`);
     } finally {
       await telegram.disconnect();
     }
+    stopOnPermanentDaemonErrors(errors);
     const elapsed = Date.now() - started;
     const delay = computeDaemonDelayMs({
       intervalMs,
@@ -127,6 +134,34 @@ function stopOnPermanentDaemonErrors(errors: NormalizedError[]): void {
     return;
   }
   throw new ToolError(permanent);
+}
+
+function recordDaemonStarted(store: MessageStore): void {
+  try {
+    store.recordDaemonTickStarted();
+  } catch (error) {
+    console.error(`daemon status start write failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function recordDaemonSuccess(store: MessageStore): void {
+  try {
+    store.recordDaemonTickSuccess();
+  } catch (error) {
+    console.error(`daemon status success write failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function recordDaemonFailure(store: MessageStore, errors: NormalizedError[]): void {
+  try {
+    store.recordDaemonTickFailure(daemonErrorSummary(errors));
+  } catch (error) {
+    console.error(`daemon status failure write failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function daemonErrorSummary(errors: NormalizedError[]): string {
+  return errors.map((error) => `${error.category}: ${error.message}`).join(" | ");
 }
 
 export async function indexEmbeddings(

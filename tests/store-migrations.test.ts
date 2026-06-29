@@ -31,12 +31,37 @@ test("old fixture DB migrates once and rebuilds FTS for historical rows", (t) =>
 
   const store = new MessageStore(dbPath);
 
-  assert.equal(store.getSchemaVersion(), 4);
+  assert.equal(store.getSchemaVersion(), 5);
   assert.equal(store.search({ chatId: "-1001", query: "historical", limit: 10 }).length, 1);
 
   const reopened = new MessageStore(dbPath);
-  assert.equal(reopened.getSchemaVersion(), 4);
+  assert.equal(reopened.getSchemaVersion(), 5);
   assert.equal(reopened.search({ chatId: "-1001", query: "searchable", limit: 10 })[0]?.messageId, 1);
+});
+
+test("daemon status records last success and failure", () => {
+  const store = new MessageStore(":memory:");
+
+  assert.equal(store.getDaemonStatus(), undefined);
+  store.recordDaemonTickStarted();
+  store.recordDaemonTickFailure("internal: first failure");
+
+  const failed = store.getDaemonStatus();
+  assert.equal(failed?.service, "sync-daemon");
+  assert.equal(typeof failed?.lastStartedAt, "string");
+  assert.equal(typeof failed?.lastFailureAt, "string");
+  assert.equal(failed?.lastError, "internal: first failure");
+  assert.equal(failed?.consecutiveFailures, 1);
+
+  store.recordDaemonTickFailure("internal: second failure");
+  assert.equal(store.getDaemonStatus()?.consecutiveFailures, 2);
+
+  store.recordDaemonTickSuccess();
+  const recovered = store.getDaemonStatus();
+  assert.equal(typeof recovered?.lastSuccessAt, "string");
+  assert.equal(typeof recovered?.lastFailureAt, "string");
+  assert.equal(recovered?.lastError, undefined);
+  assert.equal(recovered?.consecutiveFailures, 0);
 });
 
 test("failed migration rolls back user_version", (t) => {

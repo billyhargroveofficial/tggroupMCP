@@ -6,7 +6,7 @@ import type { ChatInfo } from "./telegram-client.js";
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
 const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export type StoredMessage = {
   id?: number;
@@ -32,6 +32,16 @@ export type SyncState = {
   lastBackfillAt?: string;
   backfillExhaustedAt?: string;
   lastError?: string;
+  updatedAt?: string;
+};
+
+export type DaemonStatus = {
+  service: string;
+  lastStartedAt?: string;
+  lastSuccessAt?: string;
+  lastFailureAt?: string;
+  lastError?: string;
+  consecutiveFailures: number;
   updatedAt?: string;
 };
 
@@ -728,6 +738,59 @@ export class MessageStore {
     });
   }
 
+  recordDaemonTickStarted(service = "sync-daemon"): void {
+    this.writeWithRetry("recordDaemonTickStarted", () => {
+      this.db
+        .prepare(
+          `INSERT INTO daemon_status (service, last_started_at, consecutive_failures, updated_at)
+           VALUES (?, datetime('now'), 0, datetime('now'))
+           ON CONFLICT(service) DO UPDATE SET
+             last_started_at = excluded.last_started_at,
+             updated_at = excluded.updated_at`,
+        )
+        .run(service);
+    });
+  }
+
+  recordDaemonTickSuccess(service = "sync-daemon"): void {
+    this.writeWithRetry("recordDaemonTickSuccess", () => {
+      this.db
+        .prepare(
+          `INSERT INTO daemon_status (service, last_success_at, last_error, consecutive_failures, updated_at)
+           VALUES (?, datetime('now'), NULL, 0, datetime('now'))
+           ON CONFLICT(service) DO UPDATE SET
+             last_success_at = excluded.last_success_at,
+             last_error = NULL,
+             consecutive_failures = 0,
+             updated_at = excluded.updated_at`,
+        )
+        .run(service);
+    });
+  }
+
+  recordDaemonTickFailure(error: string, service = "sync-daemon"): void {
+    this.writeWithRetry("recordDaemonTickFailure", () => {
+      this.db
+        .prepare(
+          `INSERT INTO daemon_status (service, last_failure_at, last_error, consecutive_failures, updated_at)
+           VALUES (?, datetime('now'), ?, 1, datetime('now'))
+           ON CONFLICT(service) DO UPDATE SET
+             last_failure_at = excluded.last_failure_at,
+             last_error = excluded.last_error,
+             consecutive_failures = daemon_status.consecutive_failures + 1,
+             updated_at = excluded.updated_at`,
+        )
+        .run(service, error);
+    });
+  }
+
+  getDaemonStatus(service = "sync-daemon"): DaemonStatus | undefined {
+    const row = this.db.prepare("SELECT * FROM daemon_status WHERE service = ?").get(service) as
+      | Record<string, unknown>
+      | undefined;
+    return row == null ? undefined : rowToDaemonStatus(row);
+  }
+
   getStats(chatId: string): Record<string, unknown> {
     const messageStats = this.db
       .prepare(
@@ -738,7 +801,7 @@ export class MessageStore {
     const syncState =
       (this.db.prepare("SELECT * FROM sync_state WHERE chat_id = ?").get(chatId) as Record<string, unknown> | undefined) ??
       {};
-    return { ...messageStats, syncState, embeddings: this.getEmbeddingStats(chatId) };
+    return { ...messageStats, syncState, daemonStatus: this.getDaemonStatus(), embeddings: this.getEmbeddingStats(chatId) };
   }
 
   private assertSendThrottleAvailable(params: {
@@ -902,6 +965,10 @@ export class MessageStore {
         this.applyMessageReconciliationMigration();
         this.db.exec("PRAGMA user_version = 4");
       }
+      if (currentVersion < 5) {
+        this.applyDaemonStatusMigration();
+        this.db.exec("PRAGMA user_version = 5");
+      }
       this.validateSchema();
     });
   }
@@ -964,6 +1031,16 @@ export class MessageStore {
         messages_seen INTEGER NOT NULL DEFAULT 0,
         messages_upserted INTEGER NOT NULL DEFAULT 0,
         error TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS daemon_status (
+        service TEXT PRIMARY KEY,
+        last_started_at TEXT,
+        last_success_at TEXT,
+        last_failure_at TEXT,
+        last_error TEXT,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS send_outbox (
@@ -1086,6 +1163,20 @@ export class MessageStore {
     this.ensureColumn("message_embedding_chunks", "dirty_at", "TEXT");
   }
 
+  private applyDaemonStatusMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS daemon_status (
+        service TEXT PRIMARY KEY,
+        last_started_at TEXT,
+        last_success_at TEXT,
+        last_failure_at TEXT,
+        last_error TEXT,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  }
+
   private ensureColumn(table: string, column: string, definition: string): void {
     const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[];
     if (!rows.some((row) => row.name === column)) {
@@ -1104,6 +1195,7 @@ export class MessageStore {
       "messages",
       "sync_state",
       "history_jobs",
+      "daemon_status",
       "send_outbox",
       "send_throttle_state",
       "message_embedding_chunks",
@@ -1127,6 +1219,15 @@ export class MessageStore {
     }
     this.assertColumns("messages", ["id", "chat_id", "message_id", "text", "deleted_at", "updated_at"]);
     this.assertColumns("message_embedding_chunks", ["id", "chat_id", "dirty_at", "updated_at"]);
+    this.assertColumns("daemon_status", [
+      "service",
+      "last_started_at",
+      "last_success_at",
+      "last_failure_at",
+      "last_error",
+      "consecutive_failures",
+      "updated_at",
+    ]);
     this.assertColumns("sync_state", [
       "chat_id",
       "oldest_message_id",
@@ -1276,6 +1377,18 @@ function rowToSyncState(row: Record<string, unknown>): SyncState {
     lastBackfillAt: row.last_backfill_at == null ? undefined : String(row.last_backfill_at),
     backfillExhaustedAt: row.backfill_exhausted_at == null ? undefined : String(row.backfill_exhausted_at),
     lastError: row.last_error == null ? undefined : String(row.last_error),
+    updatedAt: row.updated_at == null ? undefined : String(row.updated_at),
+  };
+}
+
+function rowToDaemonStatus(row: Record<string, unknown>): DaemonStatus {
+  return {
+    service: String(row.service),
+    lastStartedAt: row.last_started_at == null ? undefined : String(row.last_started_at),
+    lastSuccessAt: row.last_success_at == null ? undefined : String(row.last_success_at),
+    lastFailureAt: row.last_failure_at == null ? undefined : String(row.last_failure_at),
+    lastError: row.last_error == null ? undefined : String(row.last_error),
+    consecutiveFailures: Number(row.consecutive_failures ?? 0),
     updatedAt: row.updated_at == null ? undefined : String(row.updated_at),
   };
 }

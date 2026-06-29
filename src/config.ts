@@ -41,6 +41,7 @@ export const NUMERIC_ENV_RULES = {
   TELEGRAM_MAX_SYNC_LIMIT: { fallback: 500_000, min: 1, max: 1_000_000 },
   TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC: { fallback: 10, min: 0, max: 24 * 60 * 60 },
   TELEGRAM_HISTORY_WAIT_TIME_SEC: { fallback: 1, min: 0, max: 60 },
+  TELEGRAM_HISTORY_OPERATION_TIMEOUT_MS: { fallback: 120_000, min: 100, max: 24 * 60 * 60_000 },
   TELEGRAM_SYNC_INTERVAL_MS: { fallback: 60_000, min: 1_000, max: 24 * 60 * 60_000 },
   TELEGRAM_SYNC_RECENT_LIMIT: { fallback: 300, min: 0, max: 1_000_000 },
   TELEGRAM_SYNC_BACKFILL_LIMIT: { fallback: 1_000, min: 0, max: 1_000_000 },
@@ -133,6 +134,7 @@ export type AppConfig = {
     maxSyncLimit: number;
     floodWaitMaxSleepSec: number;
     historyWaitTimeSec: number;
+    historyOperationTimeoutMs: number;
     intervalMs: number;
     recentLimit: number;
     backfillLimit: number;
@@ -211,6 +213,7 @@ export function loadConfig(): AppConfig {
       maxSyncLimit: intFromEnv("TELEGRAM_MAX_SYNC_LIMIT"),
       floodWaitMaxSleepSec: intFromEnv("TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC"),
       historyWaitTimeSec: intFromEnv("TELEGRAM_HISTORY_WAIT_TIME_SEC"),
+      historyOperationTimeoutMs: intFromEnv("TELEGRAM_HISTORY_OPERATION_TIMEOUT_MS"),
       intervalMs: intFromEnv("TELEGRAM_SYNC_INTERVAL_MS"),
       recentLimit: intFromEnv("TELEGRAM_SYNC_RECENT_LIMIT"),
       backfillLimit: intFromEnv("TELEGRAM_SYNC_BACKFILL_LIMIT"),

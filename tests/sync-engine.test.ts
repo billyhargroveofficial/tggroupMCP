@@ -73,6 +73,39 @@ class FakeTelegram {
   }
 }
 
+class HangingTelegram {
+  readonly requests: Array<{ limit: number; offsetId?: number; minId?: number; waitTime?: number }> = [];
+  closed = false;
+
+  async resolveChat(): Promise<{ info: ChatInfo }> {
+    return { info: CHAT };
+  }
+
+  async iterateMessages(params: {
+    limit: number;
+    offsetId?: number;
+    minId?: number;
+    waitTime?: number;
+  }): Promise<{ chat: ChatInfo; messages: AsyncIterable<Record<string, unknown>> }> {
+    this.requests.push(params);
+    const self = this;
+    return {
+      chat: CHAT,
+      messages: {
+        [Symbol.asyncIterator]() {
+          return {
+            next: async () => new Promise<IteratorResult<Record<string, unknown>>>(() => undefined),
+            return: async () => {
+              self.closed = true;
+              return { done: true, value: undefined as unknown as Record<string, unknown> };
+            },
+          };
+        },
+      },
+    };
+  }
+}
+
 test("recent sync catches up all pages above the previous newest id", async () => {
   const store = seededStore(1000);
   const telegram = new FakeTelegram(range(1001, 1500));
@@ -102,6 +135,24 @@ test("recent sync catches up all pages above the previous newest id", async () =
     telegram.requests.map((request) => request.waitTime),
     [2, 2],
   );
+});
+
+test("history operation watchdog fails a stuck iterator and closes it", async () => {
+  const store = seededStore(1000);
+  const telegram = new HangingTelegram();
+  const syncer = new HistorySyncer(config({ historyOperationTimeoutMs: 15 }), telegram as unknown as TelegramService, store);
+
+  const result = await syncer.syncDirection({
+    mode: "recent",
+    limit: 10,
+    batchSize: 5,
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.error?.message ?? "", /Telegram recent history iterator timed out after 15ms/);
+  assert.equal(result.error?.retryable, true);
+  assert.equal(telegram.closed, true);
+  assert.match(store.getSyncState(CHAT.chatId)?.lastError ?? "", /timed out/);
 });
 
 test("partial recent failure leaves high-water mark behind for repair", async () => {
@@ -365,7 +416,7 @@ function seededStore(newestMessageId: number): MessageStore {
   return store;
 }
 
-function config(): AppConfig {
+function config(sync: Partial<AppConfig["sync"]> = {}): AppConfig {
   return {
     telegram: {
       apiId: 1,
@@ -392,11 +443,13 @@ function config(): AppConfig {
       maxSyncLimit: 500_000,
       floodWaitMaxSleepSec: 10,
       historyWaitTimeSec: 2,
+      historyOperationTimeoutMs: 120_000,
       intervalMs: 60_000,
       recentLimit: 300,
       backfillLimit: 1000,
       transientBackoffInitialMs: 5_000,
       transientBackoffMaxMs: 300_000,
+      ...sync,
     },
     embeddings: {
       enabled: false,

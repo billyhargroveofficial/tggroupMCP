@@ -435,6 +435,15 @@ Acceptance criteria:
 
 ### 14. Harden daemon failure behavior
 
+Status 2026-06-29: Completed. The daemon records each tick start plus last success/failure in a schema v5 `daemon_status` table, exposes that status through existing store stats, and logs the current daemon status with every tick. Sync history requests, iterator `next()` calls, chat resolution, and recent reconciliation lookups are bounded by `TELEGRAM_HISTORY_OPERATION_TIMEOUT_MS`; a stuck iterator fails the sync result with a retryable normalized timeout and invokes iterator cleanup without advancing cursors. Permanent auth errors are still classified as non-retryable and now record the failure before the daemon exits. The systemd sync unit uses `Restart=on-failure`, `RestartSec=30`, `StartLimitIntervalSec=10min`, and `StartLimitBurst=3` to avoid an infinite 10-second restart loop.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec` (46 passed)
+- `npm run check`
+- `npm run print-config`
+- `npm run validate-config`
+
 Problem:
 Permanent startup/auth/peer failures can restart-loop under systemd. A stuck GramJS iterator has no watchdog timeout.
 

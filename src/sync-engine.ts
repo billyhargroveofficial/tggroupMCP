@@ -83,7 +83,11 @@ export class HistorySyncer {
     resetBackfillExhausted?: boolean;
     commitCursor?: boolean;
   }): Promise<SyncResult> {
-    const resolved = await this.telegram.resolveChat(params.chat);
+    const resolved = await withOperationTimeout(
+      this.telegram.resolveChat(params.chat),
+      this.config.sync.historyOperationTimeoutMs,
+      "Telegram chat resolution",
+    );
     const chat = resolved.info;
     const currentState = this.store.getSyncState(chat.chatId);
     const batchSize = Math.max(1, Math.min(params.batchSize ?? this.config.sync.batchSize, 100));
@@ -157,17 +161,25 @@ export class HistorySyncer {
         if (params.mode === "recent") {
           let pageOffsetId = offsetId;
           while (true) {
-            const stream = await this.telegram.iterateMessages({
-              chat: chat.chatId,
-              limit: target,
-              offsetId: pageOffsetId,
-              minId,
-              waitTime: this.config.sync.historyWaitTimeSec,
-            });
+            const stream = await withOperationTimeout(
+              this.telegram.iterateMessages({
+                chat: chat.chatId,
+                limit: target,
+                offsetId: pageOffsetId,
+                minId,
+                waitTime: this.config.sync.historyWaitTimeSec,
+              }),
+              this.config.sync.historyOperationTimeoutMs,
+              "Telegram recent history request",
+            );
             let pageFetched = 0;
             let pageOldestMessageId: number | undefined;
 
-            for await (const message of stream.messages) {
+            for await (const message of iterateWithOperationTimeout(
+              stream.messages,
+              this.config.sync.historyOperationTimeoutMs,
+              "Telegram recent history iterator",
+            )) {
               fetched += 1;
               pageFetched += 1;
               const row = gramMessageToStored(stream.chat, message);
@@ -204,15 +216,23 @@ export class HistorySyncer {
             pageOffsetId = pageOldestMessageId;
           }
         } else {
-          const stream = await this.telegram.iterateMessages({
-            chat: chat.chatId,
-            limit: target,
-            offsetId,
-            minId,
-            waitTime: this.config.sync.historyWaitTimeSec,
-          });
+          const stream = await withOperationTimeout(
+            this.telegram.iterateMessages({
+              chat: chat.chatId,
+              limit: target,
+              offsetId,
+              minId,
+              waitTime: this.config.sync.historyWaitTimeSec,
+            }),
+            this.config.sync.historyOperationTimeoutMs,
+            "Telegram backfill history request",
+          );
 
-          for await (const message of stream.messages) {
+          for await (const message of iterateWithOperationTimeout(
+            stream.messages,
+            this.config.sync.historyOperationTimeoutMs,
+            "Telegram backfill history iterator",
+          )) {
             fetched += 1;
             const row = gramMessageToStored(stream.chat, message);
             if (!row) {
@@ -313,11 +333,15 @@ export class HistorySyncer {
     if (ids.length === 0) {
       return { checked: 0, refreshed: 0, deleted: 0 };
     }
-    const response = await this.telegram.getMessages({
-      chat: chat.chatId,
-      limit: ids.length,
-      ids,
-    });
+    const response = await withOperationTimeout(
+      this.telegram.getMessages({
+        chat: chat.chatId,
+        limit: ids.length,
+        ids,
+      }),
+      this.config.sync.historyOperationTimeoutMs,
+      "Telegram recent reconciliation lookup",
+    );
     const rows = response.messages
       .map((message) => gramMessageToStored(response.chat, message))
       .filter((row): row is StoredMessage => row != null);
@@ -327,4 +351,59 @@ export class HistorySyncer {
     const deleted = this.store.markMessagesDeleted(chat.chatId, missing);
     return { checked: ids.length, refreshed, deleted };
   }
+}
+
+async function* iterateWithOperationTimeout<T>(
+  iterable: AsyncIterable<T>,
+  timeoutMs: number,
+  operation: string,
+): AsyncIterable<T> {
+  const iterator = iterable[Symbol.asyncIterator]();
+  while (true) {
+    let result: IteratorResult<T>;
+    try {
+      result = await withOperationTimeout(iterator.next(), timeoutMs, operation);
+    } catch (error) {
+      closeIteratorQuietly(iterator, operation);
+      throw error;
+    }
+    if (result.done) {
+      return;
+    }
+    yield result.value;
+  }
+}
+
+async function withOperationTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, operation: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new ToolError({
+              category: "internal",
+              retryable: true,
+              message: `${operation} timed out after ${timeoutMs}ms.`,
+            }),
+          );
+        }, Math.max(1, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function closeIteratorQuietly<T>(iterator: AsyncIterator<T>, operation: string): void {
+  const close = iterator.return?.bind(iterator);
+  if (!close) {
+    return;
+  }
+  void close().catch((error) => {
+    console.error(`${operation} cleanup failed after timeout: ${error instanceof Error ? error.message : String(error)}`);
+  });
 }
