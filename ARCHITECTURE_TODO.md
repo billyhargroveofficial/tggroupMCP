@@ -375,6 +375,13 @@ Acceptance criteria:
 
 ### 12. Add cache alias resolution for usernames
 
+Status 2026-06-29: Completed. Schema version 3 adds `chat_aliases`, populated from canonical numeric chat id, requested ref, and username on chat upsert. Cache-only tools now resolve known aliases such as `@name` to the canonical numeric chat id without network calls, while unknown aliases return a peer error with remediation to call `resolve_chat` or `sync_history` once.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+
 Problem:
 Cache-only tools reject `@username`, even after a prior resolve/sync. The docs imply all tools accept optional chat refs.
 

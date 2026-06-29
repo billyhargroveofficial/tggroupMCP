@@ -6,7 +6,7 @@ import type { ChatInfo } from "./telegram-client.js";
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
 const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export type StoredMessage = {
   id?: number;
@@ -119,6 +119,17 @@ export class MessageStore {
            updated_at = excluded.updated_at`,
       )
       .run(chat.chatId, chat.title ?? null, chat.username ?? null, chat.kind, chat.isForum ? 1 : 0);
+    for (const alias of chatAliases(chat)) {
+      this.db
+        .prepare(
+          `INSERT INTO chat_aliases (alias, chat_id, updated_at)
+           VALUES (?, ?, datetime('now'))
+           ON CONFLICT(alias) DO UPDATE SET
+             chat_id = excluded.chat_id,
+             updated_at = excluded.updated_at`,
+        )
+        .run(alias, chat.chatId);
+    }
   }
 
   upsertMessages(chat: ChatInfo, messages: StoredMessage[]): number {
@@ -163,6 +174,26 @@ export class MessageStore {
       return undefined;
     }
     return rowToChatInfo(row);
+  }
+
+  resolveCachedChat(chat: string): ChatInfo | undefined {
+    const direct = this.getCachedChat(chat);
+    if (direct) {
+      return direct;
+    }
+    const alias = normalizeChatAlias(chat);
+    const row = this.db
+      .prepare(
+        `SELECT c.*
+         FROM chat_aliases a
+         JOIN chats c ON c.chat_id = a.chat_id
+         WHERE a.alias = ?`,
+      )
+      .get(alias) as Record<string, unknown> | undefined;
+    if (!row) {
+      return undefined;
+    }
+    return { ...rowToChatInfo(row), requested: chat };
   }
 
   getHistory(params: {
@@ -818,6 +849,10 @@ export class MessageStore {
         this.applyBackfillExhaustedMigration();
         this.db.exec("PRAGMA user_version = 2");
       }
+      if (currentVersion < 3) {
+        this.applyChatAliasMigration();
+        this.db.exec("PRAGMA user_version = 3");
+      }
       this.validateSchema();
     });
   }
@@ -830,6 +865,12 @@ export class MessageStore {
         username TEXT,
         kind TEXT,
         is_forum INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_aliases (
+        alias TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
 
@@ -950,6 +991,8 @@ export class MessageStore {
         ON send_outbox(chat_id, status, expires_at_ms);
       CREATE INDEX IF NOT EXISTS idx_send_outbox_user_status
         ON send_outbox(chat_id, user_key, status, expires_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_chat_aliases_chat_id
+        ON chat_aliases(chat_id);
     `);
     this.ensureColumn("sync_state", "next_backfill_offset_id", "INTEGER");
     this.ensureColumn("sync_state", "last_recent_sync_at", "TEXT");
@@ -969,6 +1012,22 @@ export class MessageStore {
     this.ensureColumn("sync_state", "backfill_exhausted_at", "TEXT");
   }
 
+  private applyChatAliasMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS chat_aliases (
+        alias TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_chat_aliases_chat_id
+        ON chat_aliases(chat_id);
+    `);
+    const chats = this.db.prepare("SELECT * FROM chats").all() as Record<string, unknown>[];
+    for (const row of chats) {
+      this.upsertChatLocked(rowToChatInfo(row));
+    }
+  }
+
   private ensureColumn(table: string, column: string, definition: string): void {
     const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[];
     if (!rows.some((row) => row.name === column)) {
@@ -983,6 +1042,7 @@ export class MessageStore {
   private validateSchema(): void {
     for (const table of [
       "chats",
+      "chat_aliases",
       "messages",
       "sync_state",
       "history_jobs",
@@ -996,6 +1056,7 @@ export class MessageStore {
     for (const index of [
       "idx_messages_chat_message_id",
       "idx_messages_sender",
+      "idx_chat_aliases_chat_id",
       "idx_embedding_chunks_lookup",
       "idx_embedding_chunks_range",
       "idx_send_outbox_chat_status",
@@ -1098,6 +1159,26 @@ function rowToChatInfo(row: Record<string, unknown>): ChatInfo {
     kind: row.kind == null ? "Cached" : String(row.kind),
     isForum: row.is_forum === 1,
   };
+}
+
+function chatAliases(chat: ChatInfo): string[] {
+  const aliases = new Set<string>([normalizeChatAlias(chat.chatId), normalizeChatAlias(chat.requested)]);
+  if (chat.username) {
+    aliases.add(normalizeChatAlias(chat.username));
+    aliases.add(normalizeChatAlias(`@${chat.username}`));
+  }
+  return [...aliases].filter(Boolean);
+}
+
+function normalizeChatAlias(chat: string): string {
+  const trimmed = chat.trim();
+  if (trimmed.startsWith("@")) {
+    return trimmed.toLowerCase();
+  }
+  if (/^[a-zA-Z0-9_]{5,}$/.test(trimmed)) {
+    return `@${trimmed.toLowerCase()}`;
+  }
+  return trimmed;
 }
 
 function rowToSyncState(row: Record<string, unknown>): SyncState {

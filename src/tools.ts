@@ -588,21 +588,24 @@ export class TelegramTools {
 
   private cacheChat(chat?: string): ChatInfo {
     const chatId = chat?.trim() || this.config.telegram.defaultChatId;
+    const cached = this.store.resolveCachedChat(chatId);
+    if (cached) {
+      this.telegram.assertChatAllowed(cached.chatId);
+      return cached;
+    }
     this.telegram.assertChatAllowed(chatId);
     if (chatId.startsWith("@")) {
       throw new ToolError({
         category: "peer",
         retryable: false,
-        message: "Cache-only reads require a numeric chat ID. Call resolve_chat/sync_history once for username targets.",
+        message: `Unknown cached chat alias ${chatId}. Call resolve_chat or sync_history for this username once, then retry the cache-only tool.`,
       });
     }
-    return (
-      this.store.getCachedChat(chatId) ?? {
-        chatId,
-        requested: chatId,
-        kind: "Cached",
-      }
-    );
+    return {
+      chatId,
+      requested: chatId,
+      kind: "Cached",
+    };
   }
 }
 
