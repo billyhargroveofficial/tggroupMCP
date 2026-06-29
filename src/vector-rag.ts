@@ -1,5 +1,12 @@
 import type { AppConfig } from "./config.js";
-import { blobToVector, cosineSimilarity, EmbeddingClient, type EmbeddingChunkInput } from "./embeddings.js";
+import {
+  blobToVector,
+  cosineSimilarity,
+  EmbeddingClient,
+  EMBEDDING_NORMALIZATION_VERSION,
+  embeddingNamespace,
+  type EmbeddingChunkInput,
+} from "./embeddings.js";
 import { ToolError } from "./errors.js";
 import { MessageStore, type KeywordSearchHit, type StoredEmbeddingChunk, type StoredMessage } from "./store.js";
 
@@ -8,6 +15,8 @@ export type EmbeddingIndexResult = {
   chatId: string;
   model: string;
   dimensions?: number;
+  namespace: string;
+  normalizationVersion: string;
   chunksCreated: number;
   messagesCovered: number;
   nextAfterMessageId?: number;
@@ -32,6 +41,8 @@ export type EmbeddingIndexEstimate = {
   baseUrl: string;
   model: string;
   dimensions?: number;
+  namespace: string;
+  normalizationVersion: string;
   chatId: string;
   limitChunks: number;
   requestedLimitChunks: number;
@@ -56,6 +67,7 @@ export type VectorSearchHit = {
     messageCount: number;
     messageIds: number[];
     text: string;
+    namespace: string;
     model: string;
     dimensions: number;
   };
@@ -75,12 +87,14 @@ export type HybridSearchHit = {
 
 export class VectorRag {
   private readonly embeddings: EmbeddingClient;
+  private readonly namespace: string;
 
   constructor(
     private readonly config: AppConfig,
     private readonly store: MessageStore,
   ) {
     this.embeddings = new EmbeddingClient(config);
+    this.namespace = embeddingNamespace(config);
   }
 
   get isConfigured(): boolean {
@@ -109,6 +123,7 @@ export class VectorRag {
     const deletedChunks = params.rebuild
       ? this.store.deleteEmbeddingChunks({
           chatId: params.chatId,
+          namespace: this.namespace,
           model: this.config.embeddings.model,
           dimensions: this.config.embeddings.dimensions,
         })
@@ -135,6 +150,7 @@ export class VectorRag {
       ? undefined
       : this.store.deleteDirtyEmbeddingChunksForMessages({
           chatId: params.chatId,
+          namespace: this.namespace,
           model: this.config.embeddings.model,
           dimensions: this.config.embeddings.dimensions,
           messageIds: inputs.flatMap((chunk) => chunk.messageIds),
@@ -145,6 +161,8 @@ export class VectorRag {
       chatId: params.chatId,
       model: this.config.embeddings.model,
       dimensions: this.config.embeddings.dimensions,
+      namespace: this.namespace,
+      normalizationVersion: EMBEDDING_NORMALIZATION_VERSION,
       chunksCreated,
       messagesCovered,
       nextAfterMessageId: afterMessageId,
@@ -153,6 +171,7 @@ export class VectorRag {
       budget: { ...estimate.budget, truncatedByCharBudget: plan.truncatedByCharBudget },
       coverage: this.store.getEmbeddingCoverageStats({
         chatId: params.chatId,
+        namespace: this.namespace,
         model: this.config.embeddings.model,
         dimensions: this.config.embeddings.dimensions,
       }),
@@ -169,7 +188,7 @@ export class VectorRag {
     this.embeddings.assertConfigured();
     const requestedLimitChunks = Math.max(1, params.limitChunks ?? this.config.embeddings.tickChunkLimit);
     const limitChunks = Math.min(requestedLimitChunks, this.config.embeddings.maxChunksPerRun);
-    const stats = this.store.getEmbeddingStats(params.chatId);
+    const stats = this.store.getEmbeddingStats(params.chatId, { namespace: this.namespace });
     const plan = this.buildChunks(params.chatId, {
       afterMessageId: params.afterMessageId,
       limitChunks,
@@ -185,6 +204,8 @@ export class VectorRag {
       baseUrl: this.config.embeddings.baseUrl,
       model: this.config.embeddings.model,
       dimensions: this.config.embeddings.dimensions,
+      namespace: this.namespace,
+      normalizationVersion: EMBEDDING_NORMALIZATION_VERSION,
       chatId: params.chatId,
       limitChunks,
       requestedLimitChunks,
@@ -202,6 +223,7 @@ export class VectorRag {
       },
       coverage: this.store.getEmbeddingCoverageStats({
         chatId: params.chatId,
+        namespace: this.namespace,
         model: this.config.embeddings.model,
         dimensions: this.config.embeddings.dimensions,
       }),
@@ -226,7 +248,7 @@ export class VectorRag {
     candidateCount?: number;
     hits: VectorSearchHit[];
   }> {
-    const stats = this.store.getEmbeddingStats(params.chatId);
+    const stats = this.store.getEmbeddingStats(params.chatId, { namespace: this.namespace });
     if (!this.embeddings.isConfigured) {
       return {
         available: false,
@@ -251,6 +273,7 @@ export class VectorRag {
     const searchDimensions = this.config.embeddings.dimensions ?? queryVector.length;
     const chunks = this.store.getEmbeddingChunks({
       chatId: params.chatId,
+      namespace: this.namespace,
       model: this.config.embeddings.model,
       dimensions: searchDimensions,
       beforeId: params.beforeId,
@@ -384,6 +407,7 @@ export class VectorRag {
           })
         : this.store.getMessagesNeedingEmbedding({
             chatId,
+            namespace: this.namespace,
             model: this.config.embeddings.model,
             dimensions: this.config.embeddings.dimensions,
             afterId: cursor,
@@ -442,6 +466,7 @@ export class VectorRag {
         messageIds: chunk.messageIds,
         messageCount: chunk.messageCount,
         text: chunk.text,
+        namespace: chunk.namespace,
         model: chunk.model,
         dimensions: chunk.dimensions,
       },

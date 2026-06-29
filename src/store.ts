@@ -6,7 +6,8 @@ import type { ChatInfo } from "./telegram-client.js";
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
 const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
+const LEGACY_EMBEDDING_NAMESPACE = "legacy";
 
 export type StoredMessage = {
   id?: number;
@@ -68,6 +69,7 @@ export type KeywordSearchHit = {
 export type StoredEmbeddingChunk = {
   id: number;
   chatId: string;
+  namespace: string;
   startMessageId: number;
   endMessageId: number;
   messageIds: number[];
@@ -369,6 +371,7 @@ export class MessageStore {
 
   getMessagesNeedingEmbedding(params: {
     chatId: string;
+    namespace: string;
     model: string;
     dimensions?: number;
     afterId?: number;
@@ -385,11 +388,18 @@ export class MessageStore {
         WHERE cm.chat_id = m.chat_id
           AND cm.message_id = m.message_id
           AND c.embedding_model = ?
+          AND c.embedding_namespace = ?
           AND (? IS NULL OR c.embedding_dimensions = ?)
           AND c.dirty_at IS NULL
       )`,
     ];
-    const values: unknown[] = [params.chatId, params.model, params.dimensions ?? null, params.dimensions ?? null];
+    const values: unknown[] = [
+      params.chatId,
+      params.model,
+      params.namespace,
+      params.dimensions ?? null,
+      params.dimensions ?? null,
+    ];
     if (params.afterId != null) {
       clauses.push("m.message_id > ?");
       values.push(params.afterId);
@@ -556,14 +566,14 @@ export class MessageStore {
     return Number(row?.count ?? 0);
   }
 
-  getEmbeddingCursor(params: { chatId: string; model: string; dimensions?: number }): number | undefined {
+  getEmbeddingCursor(params: { chatId: string; namespace: string; model: string; dimensions?: number }): number | undefined {
     const row = this.db
       .prepare(
         `SELECT MAX(end_message_id) AS cursor
          FROM message_embedding_chunks
-         WHERE chat_id = ? AND embedding_model = ? AND (? IS NULL OR embedding_dimensions = ?)`,
+         WHERE chat_id = ? AND embedding_namespace = ? AND embedding_model = ? AND (? IS NULL OR embedding_dimensions = ?)`,
       )
-      .get(params.chatId, params.model, params.dimensions ?? null, params.dimensions ?? null) as
+      .get(params.chatId, params.namespace, params.model, params.dimensions ?? null, params.dimensions ?? null) as
       | Record<string, unknown>
       | undefined;
     return row?.cursor == null ? undefined : Number(row.cursor);
@@ -577,13 +587,15 @@ export class MessageStore {
       const stmt = this.db.prepare(
         `INSERT INTO message_embedding_chunks (
            chat_id, start_message_id, end_message_id, message_count, text,
-           embedding_model, embedding_dimensions, embedding, content_hash, dirty_at, updated_at
+           embedding_namespace, embedding_model, embedding_dimensions, embedding, content_hash, dirty_at, updated_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))
-         ON CONFLICT(chat_id, start_message_id, end_message_id, embedding_model, embedding_dimensions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))
+         ON CONFLICT(chat_id, start_message_id, end_message_id, embedding_namespace)
          DO UPDATE SET
            message_count = excluded.message_count,
            text = excluded.text,
+           embedding_model = excluded.embedding_model,
+           embedding_dimensions = excluded.embedding_dimensions,
            embedding = excluded.embedding,
            content_hash = excluded.content_hash,
            dirty_at = NULL,
@@ -596,6 +608,7 @@ export class MessageStore {
           chunk.endMessageId,
           chunk.messageCount,
           chunk.text,
+          chunk.namespace,
           chunk.model,
           chunk.dimensions,
           chunk.embedding,
@@ -608,10 +621,9 @@ export class MessageStore {
              WHERE chat_id = ?
                AND start_message_id = ?
                AND end_message_id = ?
-               AND embedding_model = ?
-               AND embedding_dimensions = ?`,
+               AND embedding_namespace = ?`,
           )
-          .get(chunk.chatId, chunk.startMessageId, chunk.endMessageId, chunk.model, chunk.dimensions) as
+          .get(chunk.chatId, chunk.startMessageId, chunk.endMessageId, chunk.namespace) as
           | Record<string, unknown>
           | undefined;
         if (!row) {
@@ -627,9 +639,13 @@ export class MessageStore {
     });
   }
 
-  deleteEmbeddingChunks(params: { chatId: string; model?: string; dimensions?: number }): number {
+  deleteEmbeddingChunks(params: { chatId: string; namespace?: string; model?: string; dimensions?: number }): number {
     const clauses = ["chat_id = ?"];
     const values: unknown[] = [params.chatId];
+    if (params.namespace != null) {
+      clauses.push("embedding_namespace = ?");
+      values.push(params.namespace);
+    }
     if (params.model != null) {
       clauses.push("embedding_model = ?");
       values.push(params.model);
@@ -644,9 +660,9 @@ export class MessageStore {
     });
   }
 
-  deleteDirtyEmbeddingChunks(params: { chatId: string; model: string; dimensions?: number }): number {
-    const clauses = ["chat_id = ?", "embedding_model = ?", "dirty_at IS NOT NULL"];
-    const values: unknown[] = [params.chatId, params.model];
+  deleteDirtyEmbeddingChunks(params: { chatId: string; namespace: string; model: string; dimensions?: number }): number {
+    const clauses = ["chat_id = ?", "embedding_namespace = ?", "embedding_model = ?", "dirty_at IS NOT NULL"];
+    const values: unknown[] = [params.chatId, params.namespace, params.model];
     if (params.dimensions != null) {
       clauses.push("embedding_dimensions = ?");
       values.push(params.dimensions);
@@ -659,6 +675,7 @@ export class MessageStore {
 
   deleteDirtyEmbeddingChunksForRanges(params: {
     chatId: string;
+    namespace: string;
     model: string;
     dimensions?: number;
     ranges: Array<{ startMessageId: number; endMessageId: number }>;
@@ -670,6 +687,7 @@ export class MessageStore {
       let deleted = 0;
       const clauses = [
         "chat_id = ?",
+        "embedding_namespace = ?",
         "embedding_model = ?",
         "dirty_at IS NOT NULL",
         "start_message_id <= ?",
@@ -680,7 +698,7 @@ export class MessageStore {
       }
       const stmt = this.db.prepare(`DELETE FROM message_embedding_chunks WHERE ${clauses.join(" AND ")}`);
       for (const range of params.ranges) {
-        const values: unknown[] = [params.chatId, params.model, range.endMessageId, range.startMessageId];
+        const values: unknown[] = [params.chatId, params.namespace, params.model, range.endMessageId, range.startMessageId];
         if (params.dimensions != null) {
           values.push(params.dimensions);
         }
@@ -693,6 +711,7 @@ export class MessageStore {
 
   deleteDirtyEmbeddingChunksForMessages(params: {
     chatId: string;
+    namespace: string;
     model: string;
     dimensions?: number;
     messageIds: number[];
@@ -705,6 +724,7 @@ export class MessageStore {
       let deleted = 0;
       const clauses = [
         "chat_id = ?",
+        "embedding_namespace = ?",
         "embedding_model = ?",
         "dirty_at IS NOT NULL",
         `id IN (
@@ -718,7 +738,7 @@ export class MessageStore {
       }
       const stmt = this.db.prepare(`DELETE FROM message_embedding_chunks WHERE ${clauses.join(" AND ")}`);
       for (const messageId of messageIds) {
-        const values: unknown[] = [params.chatId, params.model, params.chatId, messageId];
+        const values: unknown[] = [params.chatId, params.namespace, params.model, params.chatId, messageId];
         if (params.dimensions != null) {
           values.push(params.dimensions);
         }
@@ -731,6 +751,7 @@ export class MessageStore {
 
   getEmbeddingChunks(params: {
     chatId: string;
+    namespace: string;
     model: string;
     dimensions?: number;
     beforeId?: number;
@@ -738,8 +759,8 @@ export class MessageStore {
     includeDirty?: boolean;
     limit?: number;
   }): StoredEmbeddingChunk[] {
-    const clauses = ["chat_id = ?", "embedding_model = ?"];
-    const values: unknown[] = [params.chatId, params.model];
+    const clauses = ["chat_id = ?", "embedding_namespace = ?", "embedding_model = ?"];
+    const values: unknown[] = [params.chatId, params.namespace, params.model];
     if (params.dimensions != null) {
       clauses.push("embedding_dimensions = ?");
       values.push(params.dimensions);
@@ -773,10 +794,17 @@ export class MessageStore {
     });
   }
 
-  getEmbeddingStats(chatId: string): Array<Record<string, unknown>> {
+  getEmbeddingStats(chatId: string, params: { namespace?: string } = {}): Array<Record<string, unknown>> {
+    const clauses = ["chat_id = ?"];
+    const values: unknown[] = [chatId];
+    if (params.namespace != null) {
+      clauses.push("embedding_namespace = ?");
+      values.push(params.namespace);
+    }
     const rows = this.db
       .prepare(
         `SELECT
+           embedding_namespace AS namespace,
            embedding_model AS model,
            embedding_dimensions AS dimensions,
            COUNT(*) AS chunks,
@@ -786,23 +814,35 @@ export class MessageStore {
            SUM(CASE WHEN dirty_at IS NOT NULL THEN 1 ELSE 0 END) AS dirty_chunks,
            MAX(updated_at) AS updated_at
          FROM message_embedding_chunks
-         WHERE chat_id = ?
-         GROUP BY embedding_model, embedding_dimensions
+         WHERE ${clauses.join(" AND ")}
+         GROUP BY embedding_namespace, embedding_model, embedding_dimensions
          ORDER BY updated_at DESC`,
       )
-      .all(chatId) as Record<string, unknown>[];
+      .all(...toSqlValues(values)) as Record<string, unknown>[];
     return rows.map((row) => ({
       ...row,
       ...this.getEmbeddingCoverageStats({
         chatId,
+        namespace: String(row.namespace),
         model: String(row.model),
         dimensions: Number(row.dimensions),
       }),
     }));
   }
 
-  getEmbeddingCoverageStats(params: { chatId: string; model: string; dimensions?: number }): Record<string, number> {
-    const values = [params.chatId, params.model, params.dimensions ?? null, params.dimensions ?? null] as const;
+  getEmbeddingCoverageStats(params: {
+    chatId: string;
+    namespace: string;
+    model: string;
+    dimensions?: number;
+  }): Record<string, number> {
+    const values = [
+      params.chatId,
+      params.namespace,
+      params.model,
+      params.dimensions ?? null,
+      params.dimensions ?? null,
+    ] as const;
     const cache = this.db
       .prepare(
         `SELECT COUNT(*) AS count
@@ -823,6 +863,7 @@ export class MessageStore {
              JOIN message_embedding_chunks c ON c.id = cm.chunk_id
              WHERE cm.chat_id = m.chat_id
                AND cm.message_id = m.message_id
+               AND c.embedding_namespace = ?
                AND c.embedding_model = ?
                AND (? IS NULL OR c.embedding_dimensions = ?)
                AND c.dirty_at IS NULL
@@ -842,6 +883,7 @@ export class MessageStore {
              JOIN message_embedding_chunks c ON c.id = cm.chunk_id
              WHERE cm.chat_id = m.chat_id
                AND cm.message_id = m.message_id
+               AND c.embedding_namespace = ?
                AND c.embedding_model = ?
                AND (? IS NULL OR c.embedding_dimensions = ?)
                AND c.dirty_at IS NULL
@@ -853,7 +895,7 @@ export class MessageStore {
       .prepare(
         `SELECT COUNT(*) AS count
          FROM message_embedding_chunks
-         WHERE chat_id = ? AND embedding_model = ? AND (? IS NULL OR embedding_dimensions = ?) AND dirty_at IS NOT NULL`,
+         WHERE chat_id = ? AND embedding_namespace = ? AND embedding_model = ? AND (? IS NULL OR embedding_dimensions = ?) AND dirty_at IS NOT NULL`,
       )
       .get(...values) as Record<string, unknown> | undefined;
 
@@ -1341,6 +1383,10 @@ export class MessageStore {
         this.applyRecentCatchupMigration();
         this.db.exec("PRAGMA user_version = 8");
       }
+      if (currentVersion < 9) {
+        this.applyEmbeddingNamespaceMigration();
+        this.db.exec("PRAGMA user_version = 9");
+      }
       this.validateSchema();
     });
   }
@@ -1451,13 +1497,14 @@ export class MessageStore {
         end_message_id INTEGER NOT NULL,
         message_count INTEGER NOT NULL,
         text TEXT NOT NULL,
+        embedding_namespace TEXT NOT NULL DEFAULT '${LEGACY_EMBEDDING_NAMESPACE}',
         embedding_model TEXT NOT NULL,
         embedding_dimensions INTEGER NOT NULL,
         embedding BLOB NOT NULL,
         content_hash TEXT NOT NULL,
         dirty_at TEXT,
         updated_at TEXT NOT NULL,
-        UNIQUE(chat_id, start_message_id, end_message_id, embedding_model, embedding_dimensions)
+        UNIQUE(chat_id, start_message_id, end_message_id, embedding_namespace)
       );
 
       CREATE TABLE IF NOT EXISTS message_embedding_chunk_messages (
@@ -1499,9 +1546,9 @@ export class MessageStore {
       CREATE INDEX IF NOT EXISTS idx_messages_chat_message_id ON messages(chat_id, message_id);
       CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(chat_id, sender_id);
       CREATE INDEX IF NOT EXISTS idx_embedding_chunks_lookup
-        ON message_embedding_chunks(chat_id, embedding_model, embedding_dimensions);
+        ON message_embedding_chunks(chat_id, embedding_namespace, embedding_model, embedding_dimensions);
       CREATE INDEX IF NOT EXISTS idx_embedding_chunks_range
-        ON message_embedding_chunks(chat_id, start_message_id, end_message_id);
+        ON message_embedding_chunks(chat_id, embedding_namespace, start_message_id, end_message_id);
       CREATE INDEX IF NOT EXISTS idx_embedding_chunk_messages_lookup
         ON message_embedding_chunk_messages(chat_id, message_id);
       CREATE INDEX IF NOT EXISTS idx_embedding_chunk_messages_chunk_position
@@ -1661,11 +1708,60 @@ export class MessageStore {
     this.ensureColumn("sync_state", "recent_catchup_newest_id", "INTEGER");
   }
 
+  private applyEmbeddingNamespaceMigration(): void {
+    if (!this.hasColumn("message_embedding_chunks", "embedding_namespace")) {
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS embedding_chunks_ad;
+        DROP INDEX IF EXISTS idx_embedding_chunks_lookup;
+        DROP INDEX IF EXISTS idx_embedding_chunks_range;
+        ALTER TABLE message_embedding_chunks RENAME TO message_embedding_chunks_old;
+        CREATE TABLE message_embedding_chunks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_id TEXT NOT NULL,
+          start_message_id INTEGER NOT NULL,
+          end_message_id INTEGER NOT NULL,
+          message_count INTEGER NOT NULL,
+          text TEXT NOT NULL,
+          embedding_namespace TEXT NOT NULL DEFAULT '${LEGACY_EMBEDDING_NAMESPACE}',
+          embedding_model TEXT NOT NULL,
+          embedding_dimensions INTEGER NOT NULL,
+          embedding BLOB NOT NULL,
+          content_hash TEXT NOT NULL,
+          dirty_at TEXT,
+          updated_at TEXT NOT NULL,
+          UNIQUE(chat_id, start_message_id, end_message_id, embedding_namespace)
+        );
+        INSERT INTO message_embedding_chunks (
+          id, chat_id, start_message_id, end_message_id, message_count, text,
+          embedding_namespace, embedding_model, embedding_dimensions, embedding, content_hash, dirty_at, updated_at
+        )
+        SELECT
+          id, chat_id, start_message_id, end_message_id, message_count, text,
+          '${LEGACY_EMBEDDING_NAMESPACE}', embedding_model, embedding_dimensions, embedding, content_hash, dirty_at, updated_at
+        FROM message_embedding_chunks_old;
+        DROP TABLE message_embedding_chunks_old;
+      `);
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_embedding_chunks_lookup
+        ON message_embedding_chunks(chat_id, embedding_namespace, embedding_model, embedding_dimensions);
+      CREATE INDEX IF NOT EXISTS idx_embedding_chunks_range
+        ON message_embedding_chunks(chat_id, embedding_namespace, start_message_id, end_message_id);
+      CREATE TRIGGER IF NOT EXISTS embedding_chunks_ad AFTER DELETE ON message_embedding_chunks BEGIN
+        DELETE FROM message_embedding_chunk_messages WHERE chunk_id = old.id;
+      END;
+    `);
+  }
+
   private ensureColumn(table: string, column: string, definition: string): void {
-    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[];
-    if (!rows.some((row) => row.name === column)) {
+    if (!this.hasColumn(table, column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
+  }
+
+  private hasColumn(table: string, column: string): boolean {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[];
+    return rows.some((row) => row.name === column);
   }
 
   private rebuildMessagesFts(): void {
@@ -1705,7 +1801,7 @@ export class MessageStore {
       this.assertSqliteObject("trigger", trigger);
     }
     this.assertColumns("messages", ["id", "chat_id", "message_id", "text", "deleted_at", "updated_at"]);
-    this.assertColumns("message_embedding_chunks", ["id", "chat_id", "dirty_at", "updated_at"]);
+    this.assertColumns("message_embedding_chunks", ["id", "chat_id", "embedding_namespace", "dirty_at", "updated_at"]);
     this.assertColumns("message_embedding_chunk_messages", ["chunk_id", "chat_id", "message_id", "position"]);
     this.assertColumns("send_outbox", [
       "id",
@@ -1941,6 +2037,7 @@ function rowToEmbeddingChunk(row: Record<string, unknown>): StoredEmbeddingChunk
   return {
     id: Number(row.id),
     chatId: String(row.chat_id),
+    namespace: String(row.embedding_namespace ?? LEGACY_EMBEDDING_NAMESPACE),
     startMessageId: Number(row.start_message_id),
     endMessageId: Number(row.end_message_id),
     messageIds: [],

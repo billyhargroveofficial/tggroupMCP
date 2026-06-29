@@ -31,11 +31,11 @@ test("old fixture DB migrates once and rebuilds FTS for historical rows", (t) =>
 
   const store = new MessageStore(dbPath);
 
-  assert.equal(store.getSchemaVersion(), 8);
+  assert.equal(store.getSchemaVersion(), 9);
   assert.equal(store.search({ chatId: "-1001", query: "historical", limit: 10 }).length, 1);
 
   const reopened = new MessageStore(dbPath);
-  assert.equal(reopened.getSchemaVersion(), 8);
+  assert.equal(reopened.getSchemaVersion(), 9);
   assert.equal(reopened.search({ chatId: "-1001", query: "searchable", limit: 10 })[0]?.messageId, 1);
 });
 
@@ -151,15 +151,23 @@ test("version 5 fixture without send tables migrates send audit schema", (t) => 
     VALUES ('-1001', 'fixture chat', 'Fake', datetime('now'));
     INSERT INTO messages (chat_id, message_id, sender_name, text, updated_at)
     VALUES ('-1001', 1, 'alice', 'preexisting fixture text', datetime('now'));
+    INSERT INTO message_embedding_chunks (
+      chat_id, start_message_id, end_message_id, message_count, text,
+      embedding_model, embedding_dimensions, embedding, content_hash, dirty_at, updated_at
+    )
+    VALUES ('-1001', 1, 1, 1, 'preexisting fixture text', 'legacy-model', 2, zeroblob(8), 'legacy-hash', NULL, datetime('now'));
     PRAGMA user_version = 5;
   `);
   db.close();
 
   const store = new MessageStore(dbPath);
 
-  assert.equal(store.getSchemaVersion(), 8);
+  assert.equal(store.getSchemaVersion(), 9);
   assert.equal(store.search({ chatId: "-1001", query: "preexisting", limit: 10 })[0]?.messageId, 1);
   assert.equal(store.countMessages("-1001"), 1);
+  const [legacyStats] = store.getEmbeddingStats("-1001");
+  assert.equal(legacyStats?.namespace, "legacy");
+  assert.equal(legacyStats?.indexed_messages, 1);
   store.updateSyncState(
     { chatId: "-1001", requested: "-1001", kind: "Fake" },
     {

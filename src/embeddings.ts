@@ -12,6 +12,7 @@ export type EmbeddingChunkInput = {
 };
 
 export type EmbeddingChunkVector = EmbeddingChunkInput & {
+  namespace: string;
   model: string;
   dimensions: number;
   embedding: Buffer;
@@ -29,6 +30,7 @@ type EmbeddingsResponse = {
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+export const EMBEDDING_NORMALIZATION_VERSION = "l2-v1";
 
 export class EmbeddingClient {
   constructor(private readonly config: AppConfig) {}
@@ -166,12 +168,44 @@ export class EmbeddingClient {
       const normalized = normalizeVector(vectors[index]);
       return {
         ...chunk,
+        namespace: embeddingNamespace(this.config),
         model: this.config.embeddings.model,
         dimensions: normalized.length,
         embedding: vectorToBlob(normalized),
         contentHash: hashText(chunk.text),
       };
     });
+  }
+}
+
+export function embeddingNamespace(config: AppConfig): string {
+  const payload = JSON.stringify({
+    provider: embeddingProviderKey(config.embeddings.baseUrl),
+    baseUrl: normalizeBaseUrl(config.embeddings.baseUrl),
+    model: config.embeddings.model,
+    dimensions: config.embeddings.dimensions ?? null,
+    normalization: EMBEDDING_NORMALIZATION_VERSION,
+  });
+  return `emb_${createHash("sha256").update(payload).digest("hex").slice(0, 24)}`;
+}
+
+function embeddingProviderKey(baseUrl: string): string {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return host.endsWith("openai.com") ? "openai" : "openai-compatible";
+  } catch {
+    return "openai-compatible";
+  }
+}
+
+function normalizeBaseUrl(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    url.hash = "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString();
+  } catch {
+    return baseUrl.replace(/\/+$/, "");
   }
 }
 

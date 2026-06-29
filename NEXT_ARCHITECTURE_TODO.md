@@ -282,7 +282,29 @@ Important operating rule:
   - List-tools JSON schema and runtime behavior match.
   - Tests cover unknown keys for representative read, sync, search, index, preview, and send tools.
 
-- [ ] 8. Namespace embeddings by provider configuration.
+- [x] 8. Namespace embeddings by provider configuration.
+
+  Status 2026-06-29: Completed. Embedding chunks now carry an `embedding_namespace` derived from provider kind,
+  normalized base URL, model, configured dimensions, and vector normalization version (`l2-v1`). Schema version is now
+  9; existing chunks migrate into the explicit `legacy` namespace while preserving chunk IDs and membership rows.
+  Current indexing, first-run confirmation, coverage, search candidates, rebuild deletion, dirty cleanup, and stats are
+  scoped by namespace. `get_status` / stats rows expose the namespace, and vector hits include the namespace used for
+  the comparison. Changing provider base URL or model now reports the current namespace as uncovered and requires
+  confirmation before embedding API calls. Embeddings remain disabled in live config.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/vector-rag.test.ts --test-reporter=spec`
+  - `node --test --import tsx tests/store-migrations.test.ts --test-reporter=spec`
+  - `node --test --import tsx tests/embeddings-opt-in.test.ts --test-reporter=spec`
+  - `node --test --import tsx tests/sqlite-writer.test.ts tests/sync-engine.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run status`
+  - live DB schema probe: `PRAGMA user_version` returned `9`; `message_embedding_chunks.embedding_namespace` and
+    namespace-aware embedding indexes were present
+  - `npm test`
+  - `npm run smoke:mcp`
+  - `npm run secret-scan`
 
   Problem:
   Vector chunks are scoped by model and dimensions, but not by embedding provider/base URL or normalization version. Changing provider with the same model/dimensions can reuse old vectors and avoid first-run confirmation.

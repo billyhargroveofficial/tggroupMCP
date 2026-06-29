@@ -62,6 +62,7 @@ test("embedding chunk writes wait and retry while another SQLite writer holds th
         endMessageId: 2,
         messageCount: 2,
         text: "embedding text",
+        namespace: "test-namespace",
         model: "test-model",
         dimensions: 3,
         embedding: new Uint8Array([1, 2, 3]),

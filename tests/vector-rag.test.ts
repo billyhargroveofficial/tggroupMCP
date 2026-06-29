@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AppConfig } from "../src/config.js";
-import { vectorToBlob } from "../src/embeddings.js";
+import { embeddingNamespace, vectorToBlob } from "../src/embeddings.js";
 import { MessageStore } from "../src/store.js";
 import type { ChatInfo } from "../src/telegram-client.js";
 import { VectorRag } from "../src/vector-rag.js";
@@ -60,6 +60,7 @@ test("coverage indexing picks up older backfill after recent messages were index
 
   const chunks = store.getEmbeddingChunks({
     chatId: CHAT.chatId,
+    namespace: namespace(),
     model: config().embeddings.model,
     dimensions: config().embeddings.dimensions,
   });
@@ -102,6 +103,7 @@ test("dirty chunks are excluded from search and reindexed after message edits", 
   assert.equal(
     store.getEmbeddingChunks({
       chatId: CHAT.chatId,
+      namespace: namespace(),
       model: config().embeddings.model,
       dimensions: config().embeddings.dimensions,
     }).length,
@@ -136,6 +138,7 @@ test("vector hits hydrate exact chunk message ids across empty messages", async 
   });
   const [chunk] = store.getEmbeddingChunks({
     chatId: CHAT.chatId,
+    namespace: namespace(),
     model: config().embeddings.model,
     dimensions: config().embeddings.dimensions,
   });
@@ -265,6 +268,7 @@ test("embedding dimension mismatch fails indexing clearly", async (t) => {
   assert.equal(
     store.getEmbeddingChunks({
       chatId: CHAT.chatId,
+      namespace: namespace({ dimensions: 2 }),
       model: config().embeddings.model,
       dimensions: 2,
     }).length,
@@ -293,6 +297,7 @@ test("vector search uses actual query dimensions for mixed indexes", async (t) =
       messageIds: [1],
       messageCount: 1,
       text: "two dimensional needle",
+      namespace: namespace({ dimensions: undefined }),
       model: config().embeddings.model,
       dimensions: 2,
       embedding: vectorToBlob([1, 0]),
@@ -305,6 +310,7 @@ test("vector search uses actual query dimensions for mixed indexes", async (t) =
       messageIds: [2],
       messageCount: 1,
       text: "three dimensional distractor",
+      namespace: namespace({ dimensions: undefined }),
       model: config().embeddings.model,
       dimensions: 3,
       embedding: vectorToBlob([1, 0, 0]),
@@ -321,6 +327,103 @@ test("vector search uses actual query dimensions for mixed indexes", async (t) =
     result.stats.map((row) => row.dimensions).sort(),
     [2, 3],
   );
+});
+
+test("changing provider or model starts a separate confirmed namespace", async (t) => {
+  mockEmbeddingFetch(t);
+  const store = new MessageStore(":memory:");
+  const firstConfig = config();
+  const firstRag = new VectorRag(firstConfig, store);
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 1, senderName: "alice", text: "namespace alpha" },
+    { chatId: CHAT.chatId, messageId: 2, senderName: "bob", text: "namespace beta" },
+  ]);
+
+  const first = await firstRag.indexCachedMessages({
+    chatId: CHAT.chatId,
+    limitChunks: 1,
+    confirmFirstRun: true,
+  });
+  assert.equal(first.namespace, embeddingNamespace(firstConfig));
+  assert.equal(first.normalizationVersion, "l2-v1");
+
+  const providerConfig = config({ baseUrl: "https://embeddings.example.test/v1" });
+  const providerEstimate = new VectorRag(providerConfig, store).estimateIndexCachedMessages({
+    chatId: CHAT.chatId,
+    limitChunks: 1,
+  });
+  assert.notEqual(providerEstimate.namespace, first.namespace);
+  assert.equal(providerEstimate.firstRun, true);
+  assert.equal(providerEstimate.requiresConfirmation, true);
+  assert.equal(providerEstimate.existingChunks, 0);
+  assert.equal(providerEstimate.coverage.indexed_messages, 0);
+  assert.equal(providerEstimate.coverage.uncovered_messages, 2);
+
+  const modelConfig = config({ model: "other-embedding-model" });
+  const modelEstimate = new VectorRag(modelConfig, store).estimateIndexCachedMessages({
+    chatId: CHAT.chatId,
+    limitChunks: 1,
+  });
+  assert.notEqual(modelEstimate.namespace, first.namespace);
+  assert.equal(modelEstimate.firstRun, true);
+  assert.equal(modelEstimate.requiresConfirmation, true);
+  assert.equal(modelEstimate.coverage.uncovered_messages, 2);
+
+  const stats = store.getEmbeddingStats(CHAT.chatId);
+  assert.equal(stats.some((row) => row.namespace === first.namespace), true);
+});
+
+test("vector search only compares chunks from the current namespace", async (t) => {
+  mockFetch(t, async () =>
+    new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const store = new MessageStore(":memory:");
+  const currentConfig = config({ baseUrl: "https://current-provider.example.test/v1" });
+  const currentNamespace = embeddingNamespace(currentConfig);
+  const otherNamespace = embeddingNamespace(config({ baseUrl: "https://other-provider.example.test/v1" }));
+  const vectorRag = new VectorRag(currentConfig, store);
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 1, senderName: "alice", text: "other namespace perfect match" },
+    { chatId: CHAT.chatId, messageId: 2, senderName: "bob", text: "current namespace weak match" },
+  ]);
+  store.upsertEmbeddingChunks([
+    {
+      chatId: CHAT.chatId,
+      startMessageId: 1,
+      endMessageId: 1,
+      messageIds: [1],
+      messageCount: 1,
+      text: "other namespace perfect match",
+      namespace: otherNamespace,
+      model: currentConfig.embeddings.model,
+      dimensions: 2,
+      embedding: vectorToBlob([1, 0]),
+      contentHash: "other",
+    },
+    {
+      chatId: CHAT.chatId,
+      startMessageId: 2,
+      endMessageId: 2,
+      messageIds: [2],
+      messageCount: 1,
+      text: "current namespace weak match",
+      namespace: currentNamespace,
+      model: currentConfig.embeddings.model,
+      dimensions: 2,
+      embedding: vectorToBlob([0, 1]),
+      contentHash: "current",
+    },
+  ]);
+
+  const result = await vectorRag.search({ chatId: CHAT.chatId, query: "perfect", limit: 5, includeMessages: true });
+
+  assert.equal(result.hits.length, 1);
+  assert.equal(result.hits[0]?.chunk.namespace, currentNamespace);
+  assert.equal(result.hits[0]?.messages[0]?.messageId, 2);
+  assert.deepEqual(result.stats.map((row) => row.namespace), [currentNamespace]);
 });
 
 test("vector search refuses candidate sets above the configured bound", async (t) => {
@@ -344,6 +447,7 @@ test("vector search refuses candidate sets above the configured bound", async (t
       messageIds: [1],
       messageCount: 1,
       text: "first",
+      namespace: namespace({ dimensions: 2, vectorCandidateLimit: 1 }),
       model: config().embeddings.model,
       dimensions: 2,
       embedding: vectorToBlob([1, 0]),
@@ -356,6 +460,7 @@ test("vector search refuses candidate sets above the configured bound", async (t
       messageIds: [2],
       messageCount: 1,
       text: "second",
+      namespace: namespace({ dimensions: 2, vectorCandidateLimit: 1 }),
       model: config().embeddings.model,
       dimensions: 2,
       embedding: vectorToBlob([0, 1]),
@@ -391,6 +496,7 @@ test("hybrid ranking merges overlapping keyword and vector evidence", () => {
           messageCount: 1,
           messageIds: [2],
           text: "shared evidence chunk",
+          namespace: namespace(),
           model: config().embeddings.model,
           dimensions: 2,
         },
@@ -406,6 +512,7 @@ test("hybrid ranking merges overlapping keyword and vector evidence", () => {
           messageCount: 1,
           messageIds: [3],
           text: "vector only chunk",
+          namespace: namespace(),
           model: config().embeddings.model,
           dimensions: 2,
         },
@@ -441,6 +548,7 @@ test("chunk overlap repeats trailing message membership", async (t) => {
 
   const chunks = store.getEmbeddingChunks({
     chatId: CHAT.chatId,
+    namespace: namespace({ chunkMessages: 2, chunkOverlapMessages: 1 }),
     model: config().embeddings.model,
     dimensions: config().embeddings.dimensions,
   });
@@ -469,6 +577,7 @@ test("long messages are truncated to the configured chunk max", async (t) => {
   await vectorRag.indexCachedMessages({ chatId: CHAT.chatId, limitChunks: 1, confirmFirstRun: true });
   const [chunk] = store.getEmbeddingChunks({
     chatId: CHAT.chatId,
+    namespace: namespace({ chunkMessages: 1, chunkMaxChars: 80 }),
     model: config().embeddings.model,
     dimensions: config().embeddings.dimensions,
   });
@@ -578,4 +687,8 @@ function config(embeddings: Partial<AppConfig["embeddings"]> = {}): AppConfig {
       maxRunningPerChat: 1,
     },
   };
+}
+
+function namespace(embeddings: Partial<AppConfig["embeddings"]> = {}): string {
+  return embeddingNamespace(config(embeddings));
 }

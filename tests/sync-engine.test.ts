@@ -423,6 +423,7 @@ test("recent reconciliation updates edited messages and marks embedding chunks d
       endMessageId: 1000,
       messageCount: 1,
       text: "old searchable text",
+      namespace: "test-namespace",
       model: "test",
       dimensions: 3,
       embedding: new Uint8Array([1, 2, 3]),
