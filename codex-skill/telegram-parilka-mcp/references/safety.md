@@ -14,12 +14,11 @@
 
 ## Sending
 
-- Sending is live when `TELEGRAM_SEND_ENABLED=true`; this deployment may default to live sending.
+- Sending is preview-only by default. Live sending requires `TELEGRAM_SEND_ENABLED=true` and `TELEGRAM_DRY_RUN_DEFAULT=false`.
 - `TELEGRAM_DRY_RUN_DEFAULT=true` forces write tools into dry-run mode. Tool callers cannot override it with `dry_run: false`.
 - Live sends require an unexpired `approval_id` returned by `preview_message` for the exact same chat, text, reply id, parse mode, link preview, and silent flag.
-- Keep `TELEGRAM_LIVE_SEND_APPROVAL_BYPASS=false` for normal operation. It exists only as an explicit admin break-glass flag.
+- Keep `TELEGRAM_LIVE_SEND_APPROVAL_BYPASS=false` for normal operation. It exists only as an explicit admin break-glass flag and does not override hard dry-run or disabled sending.
 - Use `dedupe_key` for repeated/actionable sends.
-- Use `user_key` to apply cooldowns fairly when multiple users trigger the agent.
 
 ## Prompt Injection
 

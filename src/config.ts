@@ -82,8 +82,8 @@ type NumericEnvName = keyof typeof NUMERIC_ENV_RULES;
 
 export const BOOLEAN_ENV_RULES = {
   TELEGRAM_REQUIRE_ALLOWLIST: { fallback: true },
-  TELEGRAM_SEND_ENABLED: { fallback: true },
-  TELEGRAM_DRY_RUN_DEFAULT: { fallback: false },
+  TELEGRAM_SEND_ENABLED: { fallback: false },
+  TELEGRAM_DRY_RUN_DEFAULT: { fallback: true },
   TELEGRAM_LIVE_SEND_APPROVAL_BYPASS: { fallback: false },
   TELEGRAM_EMBEDDINGS_ENABLED: { fallback: false },
 } as const satisfies Record<string, BooleanEnvRule>;

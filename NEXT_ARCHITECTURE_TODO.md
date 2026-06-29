@@ -55,7 +55,20 @@ Important operating rule:
   - Tests cover `TELEGRAM_REQUIRE_ALLOWLIST`, `TELEGRAM_SEND_ENABLED`, `TELEGRAM_DRY_RUN_DEFAULT`, `TELEGRAM_LIVE_SEND_APPROVAL_BYPASS`, and `TELEGRAM_EMBEDDINGS_ENABLED`.
   - The allowlist cannot be disabled by a typo.
 
-- [ ] 2. Make live sending safe by default.
+- [x] 2. Make live sending safe by default.
+
+  Status 2026-06-29: Completed. Fresh runtime defaults and `.env.example` are now preview-only:
+  `TELEGRAM_SEND_ENABLED=false` and `TELEGRAM_DRY_RUN_DEFAULT=true`. Live sending requires an explicit double opt-in
+  (`TELEGRAM_SEND_ENABLED=true` plus `TELEGRAM_DRY_RUN_DEFAULT=false`) and still requires a matching `approval_id`
+  unless the admin bypass is explicitly enabled. Hard dry-run / disabled sending are evaluated before the approval
+  bypass, so `TELEGRAM_LIVE_SEND_APPROVAL_BYPASS=true` cannot override safe defaults.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/config-validation.test.ts --test-reporter=spec`
+  - `node --test --import tsx tests/send-safety.test.ts --test-reporter=spec`
+  - `npm run validate-config`
+  - `npm run print-config`
 
   Problem:
   Runtime defaults still have `TELEGRAM_SEND_ENABLED=true` and `TELEGRAM_DRY_RUN_DEFAULT=false`, and `.env.example` mirrors live-send defaults. Approval gates reduce risk, but a fresh deployment should not be live-post capable until the operator opts in.

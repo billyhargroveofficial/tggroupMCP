@@ -67,6 +67,50 @@ test("hard dry-run mode cannot be bypassed with dry_run:false", async () => {
   assert.equal(telegram.sends.length, 0);
 });
 
+test("hard dry-run wins over approval bypass", async () => {
+  const telegram = new FakeTelegram();
+  const { tools } = makeTools(telegram, {
+    safety: {
+      sendEnabled: true,
+      dryRunDefault: true,
+      liveSendApprovalBypass: true,
+    },
+  });
+
+  const result = await callTool(tools, "send_message", {
+    text: "bypass still previews",
+    dry_run: false,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.dry_run, true);
+  assert.equal(result.hard_dry_run, true);
+  assert.equal(result.send_enabled, true);
+  assert.equal(telegram.sends.length, 0);
+});
+
+test("send disabled wins over approval bypass", async () => {
+  const telegram = new FakeTelegram();
+  const { tools } = makeTools(telegram, {
+    safety: {
+      sendEnabled: false,
+      dryRunDefault: false,
+      liveSendApprovalBypass: true,
+    },
+  });
+
+  const result = await callTool(tools, "send_message", {
+    text: "disabled send stays dry",
+    dry_run: false,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.dry_run, true);
+  assert.equal(result.hard_dry_run, true);
+  assert.equal(result.send_enabled, false);
+  assert.equal(telegram.sends.length, 0);
+});
+
 test("live send rejects without an approval id", async () => {
   const telegram = new FakeTelegram();
   const { tools } = makeTools(telegram);

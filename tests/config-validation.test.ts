@@ -65,6 +65,32 @@ test("allowlist cannot be disabled by a boolean typo", () => {
   });
 });
 
+test("unset boolean defaults are safe for live sending", () => {
+  withEnv(unsetBooleanEnv(), () => {
+    const config = loadConfig();
+    assert.equal(config.safety.sendEnabled, false);
+    assert.equal(config.safety.dryRunDefault, true);
+    assert.equal(config.safety.liveSendApprovalBypass, false);
+  });
+});
+
+test("explicit live send opt-in requires send enabled and hard dry-run disabled", () => {
+  withEnv(
+    {
+      ...unsetBooleanEnv(),
+      TELEGRAM_SEND_ENABLED: "true",
+      TELEGRAM_DRY_RUN_DEFAULT: "false",
+      TELEGRAM_LIVE_SEND_APPROVAL_BYPASS: "false",
+    },
+    () => {
+      const config = loadConfig();
+      assert.equal(config.safety.sendEnabled, true);
+      assert.equal(config.safety.dryRunDefault, false);
+      assert.equal(config.safety.liveSendApprovalBypass, false);
+    },
+  );
+});
+
 test("cross-field validation rejects a backoff max below initial backoff", () => {
   withEnv(
     {
@@ -151,7 +177,38 @@ test("configured dotenv files are parsed without shell execution", () => {
   }
 });
 
-function withEnv(vars: Record<string, string>, fn: () => void): void {
+test("copied env example keeps live sends hard-disabled", () => {
+  const dir = mkdtempSync(join(tmpdir(), "telegram-config-example-test-"));
+  try {
+    const result = spawnSync(process.execPath, ["--import", "tsx", "src/index.ts", "--print-config"], {
+      cwd: process.cwd(),
+      env: {
+        HOME: dir,
+        PATH: process.env.PATH ?? "",
+        TELEGRAM_SHARED_ENV_PATH: join(dir, "missing-shared.env"),
+        TELEGRAM_ENV_PATH: join(process.cwd(), ".env.example"),
+        TELEGRAM_DB_PATH: join(dir, "messages.sqlite"),
+      },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(result.stdout) as {
+      safety: { sendEnabled: boolean; dryRunDefault: boolean; liveSendApprovalBypass: boolean };
+    };
+    assert.equal(config.safety.sendEnabled, false);
+    assert.equal(config.safety.dryRunDefault, true);
+    assert.equal(config.safety.liveSendApprovalBypass, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function unsetBooleanEnv(): Record<string, undefined> {
+  return Object.fromEntries(Object.keys(BOOLEAN_ENV_RULES).map((name) => [name, undefined])) as Record<string, undefined>;
+}
+
+function withEnv(vars: Record<string, string | undefined>, fn: () => void): void {
   const dir = mkdtempSync(join(tmpdir(), "telegram-config-test-"));
   const applied = {
     ...vars,
@@ -160,7 +217,12 @@ function withEnv(vars: Record<string, string>, fn: () => void): void {
   const previous = new Map<string, string | undefined>();
   for (const key of Object.keys(applied)) {
     previous.set(key, process.env[key]);
-    process.env[key] = applied[key];
+    const value = applied[key];
+    if (value == null) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
   }
   try {
     fn();
