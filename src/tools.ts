@@ -243,6 +243,7 @@ export class TelegramTools {
         tickChunkLimit: this.config.embeddings.tickChunkLimit,
         maxChunksPerRun: this.config.embeddings.maxChunksPerRun,
         maxCharsPerRun: this.config.embeddings.maxCharsPerRun,
+        vectorCandidateLimit: this.config.embeddings.vectorCandidateLimit,
       },
       throttle: this.config.throttle,
     };

@@ -124,6 +124,7 @@ function config(): AppConfig {
       tickChunkLimit: 100,
       maxChunksPerRun: 1000,
       maxCharsPerRun: 500_000,
+      vectorCandidateLimit: 20_000,
       searchLimit: 12,
     },
     throttle: {

@@ -595,6 +595,16 @@ Acceptance criteria:
 
 ### 19. Replace vector full scan before scale-up
 
+Status 2026-06-29: Completed as a bounded exact-candidate strategy, with future ANN/vector-extension work split behind measured need. Vector search now reads at most `TELEGRAM_EMBEDDINGS_VECTOR_CANDIDATE_LIMIT + 1` clean chunks for the selected model/dimension and fails closed with remediation instead of loading an unbounded full index. Successful vector results report candidate count/limit. `npm run benchmark:vector` provides a no-network synthetic cosine-loop benchmark before raising the candidate limit; README documents the current target (p95 <= 250ms at the configured limit), bounded memory posture, and fallback path to sqlite-vec/sqlite-vss/pgvector/FAISS if the expected full index cannot meet the target.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec` (56 passed)
+- `npm run check`
+- `npm run print-config`
+- `npm run validate-config`
+- `npm run benchmark:vector -- --candidates 20000 --dimensions 256 --runs 5 --target-p95-ms 250` (`p95Ms: 29.21`, `rssMb: 121.6`)
+
 Problem:
 Vector search loads all chunks and sorts in JS. This is acceptable for small indexes, but not for large history.
 

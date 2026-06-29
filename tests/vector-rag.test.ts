@@ -323,6 +323,52 @@ test("vector search uses actual query dimensions for mixed indexes", async (t) =
   );
 });
 
+test("vector search refuses candidate sets above the configured bound", async (t) => {
+  mockFetch(t, async () =>
+    new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const store = new MessageStore(":memory:");
+  const vectorRag = new VectorRag(config({ dimensions: 2, vectorCandidateLimit: 1 }), store);
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 1, senderName: "alice", text: "first" },
+    { chatId: CHAT.chatId, messageId: 2, senderName: "bob", text: "second" },
+  ]);
+  store.upsertEmbeddingChunks([
+    {
+      chatId: CHAT.chatId,
+      startMessageId: 1,
+      endMessageId: 1,
+      messageIds: [1],
+      messageCount: 1,
+      text: "first",
+      model: config().embeddings.model,
+      dimensions: 2,
+      embedding: vectorToBlob([1, 0]),
+      contentHash: "first",
+    },
+    {
+      chatId: CHAT.chatId,
+      startMessageId: 2,
+      endMessageId: 2,
+      messageIds: [2],
+      messageCount: 1,
+      text: "second",
+      model: config().embeddings.model,
+      dimensions: 2,
+      embedding: vectorToBlob([0, 1]),
+      contentHash: "second",
+    },
+  ]);
+
+  await assert.rejects(
+    () => vectorRag.search({ chatId: CHAT.chatId, query: "first", limit: 1 }),
+    /Vector search candidate limit 1 exceeded/,
+  );
+});
+
 function mockEmbeddingFetch(t: { after(fn: () => void): void }): void {
   mockFetch(t, async (_url, init) => embeddingResponse(init as RequestInit));
 }
@@ -409,6 +455,7 @@ function config(embeddings: Partial<AppConfig["embeddings"]> = {}): AppConfig {
       tickChunkLimit: 100,
       maxChunksPerRun: 1000,
       maxCharsPerRun: 500_000,
+      vectorCandidateLimit: 20_000,
       searchLimit: 12,
       ...embeddings,
     },

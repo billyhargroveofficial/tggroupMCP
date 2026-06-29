@@ -682,6 +682,7 @@ export class MessageStore {
     beforeId?: number;
     afterId?: number;
     includeDirty?: boolean;
+    limit?: number;
   }): StoredEmbeddingChunk[] {
     const clauses = ["chat_id = ?", "embedding_model = ?"];
     const values: unknown[] = [params.chatId, params.model];
@@ -700,11 +701,16 @@ export class MessageStore {
     if (!params.includeDirty) {
       clauses.push("dirty_at IS NULL");
     }
+    const limitClause = params.limit == null ? "" : "LIMIT ?";
+    if (params.limit != null) {
+      values.push(params.limit);
+    }
     const rows = this.db
       .prepare(
         `SELECT * FROM message_embedding_chunks
          WHERE ${clauses.join(" AND ")}
-         ORDER BY start_message_id ASC`,
+         ORDER BY start_message_id ASC
+         ${limitClause}`,
       )
       .all(...toSqlValues(values)) as Record<string, unknown>[];
     return rows.map((row) => {

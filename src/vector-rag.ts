@@ -221,6 +221,8 @@ export class VectorRag {
     available: boolean;
     error?: string;
     stats: Array<Record<string, unknown>>;
+    candidateLimit?: number;
+    candidateCount?: number;
     hits: VectorSearchHit[];
   }> {
     const stats = this.store.getEmbeddingStats(params.chatId);
@@ -252,7 +254,15 @@ export class VectorRag {
       dimensions: searchDimensions,
       beforeId: params.beforeId,
       afterId: params.afterId,
+      limit: this.config.embeddings.vectorCandidateLimit + 1,
     });
+    if (chunks.length > this.config.embeddings.vectorCandidateLimit) {
+      throw new ToolError({
+        category: "internal",
+        retryable: false,
+        message: `Vector search candidate limit ${this.config.embeddings.vectorCandidateLimit} exceeded for model ${this.config.embeddings.model} and dimensions ${searchDimensions}. Narrow the search with before_id/after_id or raise TELEGRAM_EMBEDDINGS_VECTOR_CANDIDATE_LIMIT after benchmarking.`,
+      });
+    }
     const mismatchedChunk = chunks.find((chunk) => chunk.dimensions !== queryVector.length);
     if (mismatchedChunk) {
       throw new ToolError({
@@ -270,6 +280,8 @@ export class VectorRag {
     return {
       available: true,
       stats,
+      candidateLimit: this.config.embeddings.vectorCandidateLimit,
+      candidateCount: chunks.length,
       hits: scored.map((hit, index) => this.toVectorHit(hit.chunk, hit.score, index + 1, params.includeMessages ?? true)),
     };
   }

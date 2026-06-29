@@ -21,6 +21,7 @@
     "validate-config": "tsx src/index.ts --validate-config",
     "sync-once": "tsx src/sync-daemon.ts --once",
     "sync-daemon": "tsx src/sync-daemon.ts",
+    "benchmark:vector": "tsx scripts/benchmark-vector-search.ts",
     "start": "node dist/index.js"
   },
   "dependencies": {

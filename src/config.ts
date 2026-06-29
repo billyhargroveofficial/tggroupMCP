@@ -57,6 +57,7 @@ export const NUMERIC_ENV_RULES = {
   TELEGRAM_EMBEDDINGS_TICK_CHUNK_LIMIT: { fallback: 100, min: 1, max: 100_000 },
   TELEGRAM_EMBEDDINGS_MAX_CHUNKS_PER_RUN: { fallback: 1_000, min: 1, max: 100_000 },
   TELEGRAM_EMBEDDINGS_MAX_CHARS_PER_RUN: { fallback: 500_000, min: 1, max: 50_000_000 },
+  TELEGRAM_EMBEDDINGS_VECTOR_CANDIDATE_LIMIT: { fallback: 20_000, min: 1, max: 1_000_000 },
   TELEGRAM_EMBEDDINGS_SEARCH_LIMIT: { fallback: 12, min: 1, max: 1_000 },
   TELEGRAM_DEDUPE_TTL_MS: { fallback: 10 * 60_000, min: 1_000, max: 30 * 24 * 60 * 60_000 },
   TELEGRAM_USER_COOLDOWN_MS: { fallback: 20_000, min: 0, max: 24 * 60 * 60_000 },
@@ -161,6 +162,7 @@ export type AppConfig = {
     tickChunkLimit: number;
     maxChunksPerRun: number;
     maxCharsPerRun: number;
+    vectorCandidateLimit: number;
     searchLimit: number;
   };
   throttle: {
@@ -245,6 +247,7 @@ export function loadConfig(): AppConfig {
       tickChunkLimit: intFromEnv("TELEGRAM_EMBEDDINGS_TICK_CHUNK_LIMIT"),
       maxChunksPerRun: intFromEnv("TELEGRAM_EMBEDDINGS_MAX_CHUNKS_PER_RUN"),
       maxCharsPerRun: intFromEnv("TELEGRAM_EMBEDDINGS_MAX_CHARS_PER_RUN"),
+      vectorCandidateLimit: intFromEnv("TELEGRAM_EMBEDDINGS_VECTOR_CANDIDATE_LIMIT"),
       searchLimit: intFromEnv("TELEGRAM_EMBEDDINGS_SEARCH_LIMIT"),
     },
     throttle: {
@@ -301,6 +304,7 @@ export function redactedConfig(config: AppConfig): Record<string, unknown> {
       tickChunkLimit: config.embeddings.tickChunkLimit,
       maxChunksPerRun: config.embeddings.maxChunksPerRun,
       maxCharsPerRun: config.embeddings.maxCharsPerRun,
+      vectorCandidateLimit: config.embeddings.vectorCandidateLimit,
       searchLimit: config.embeddings.searchLimit,
     },
     throttle: config.throttle,

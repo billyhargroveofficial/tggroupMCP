@@ -56,6 +56,17 @@ The regular sync daemon indexes new chunks only when embeddings are explicitly e
 indexing run it logs the estimate and skips API calls until you run a confirmed manual index. `search_messages` returns
 keyword, vector, and hybrid candidates; `semantic_search_messages` returns only cosine-ranked chunks.
 
+Vector search uses an exact in-process cosine scan capped by `TELEGRAM_EMBEDDINGS_VECTOR_CANDIDATE_LIMIT` (default
+20,000 chunks). If a query would exceed the cap, narrow it with `before_id`/`after_id` or raise the cap only after a
+local benchmark. Current target: p95 <= 250ms and bounded RSS at the configured candidate limit.
+
+```bash
+npm run benchmark:vector -- --candidates 20000 --dimensions 256 --target-p95-ms 250
+```
+
+If the expected full index cannot meet that target, keep the cap in place and switch the vector store to sqlite-vec,
+sqlite-vss, pgvector, or FAISS before increasing the scanned candidate set.
+
 MCP config example:
 
 ```toml
