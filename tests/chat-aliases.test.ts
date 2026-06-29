@@ -109,6 +109,7 @@ function config(): AppConfig {
       maxRetries: 2,
       retryInitialMs: 0,
       chunkMessages: 12,
+      chunkOverlapMessages: 0,
       chunkMaxChars: 1600,
       tickChunkLimit: 100,
       maxChunksPerRun: 1000,

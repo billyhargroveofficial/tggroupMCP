@@ -64,7 +64,8 @@ export type VectorSearchHit = {
 
 export type HybridSearchHit = {
   rank: number;
-  source: "keyword" | "vector";
+  source: "keyword" | "vector" | "hybrid";
+  sources: Array<"keyword" | "vector">;
   score: number;
   messageId?: number;
   startMessageId?: number;
@@ -287,27 +288,50 @@ export class VectorRag {
   }
 
   hybrid(keywordHits: KeywordSearchHit[], vectorHits: VectorSearchHit[], limit: number): HybridSearchHit[] {
-    const results: HybridSearchHit[] = [];
-    for (const [index, hit] of keywordHits.entries()) {
-      results.push({
-        rank: index + 1,
-        source: "keyword",
-        score: reciprocalRank(index),
-        messageId: hit.message.messageId,
-        text: formatMessage(hit.message),
-      });
-    }
+    type DraftHit = Omit<HybridSearchHit, "rank" | "source"> & { bestRank: number };
+    const results = new Map<string, DraftHit>();
+    const vectorKeyByMessageId = new Map<number, string>();
+
     for (const [index, hit] of vectorHits.entries()) {
-      results.push({
-        rank: index + 1,
-        source: "vector",
-        score: hit.score + reciprocalRank(index),
+      const key = `chunk:${hit.chunk.id}`;
+      for (const message of hit.messages) {
+        vectorKeyByMessageId.set(message.messageId, key);
+      }
+      results.set(key, mergeHybridHit(results.get(key), {
+        sources: ["vector"],
+        score: reciprocalRank(index),
+        bestRank: index + 1,
         startMessageId: hit.chunk.startMessageId,
         endMessageId: hit.chunk.endMessageId,
         text: hit.chunk.text,
-      });
+      }));
     }
-    return results.sort((left, right) => right.score - left.score).slice(0, limit);
+
+    for (const [index, hit] of keywordHits.entries()) {
+      const vectorKey = vectorKeyByMessageId.get(hit.message.messageId);
+      const key = vectorKey ?? `message:${hit.message.chatId}:${hit.message.messageId}`;
+      results.set(key, mergeHybridHit(results.get(key), {
+        sources: ["keyword"],
+        score: reciprocalRank(index),
+        bestRank: index + 1,
+        messageId: hit.message.messageId,
+        text: vectorKey ? (results.get(vectorKey)?.text ?? formatMessage(hit.message)) : formatMessage(hit.message),
+      }));
+    }
+
+    return [...results.values()]
+      .sort((left, right) => right.score - left.score || left.bestRank - right.bestRank)
+      .slice(0, limit)
+      .map((hit, index) => ({
+        rank: index + 1,
+        source: hit.sources.length > 1 ? "hybrid" : hit.sources[0]!,
+        sources: hit.sources,
+        score: hit.score,
+        messageId: hit.messageId,
+        startMessageId: hit.startMessageId,
+        endMessageId: hit.endMessageId,
+        text: hit.text,
+      }));
   }
 
   private buildChunks(
@@ -321,14 +345,22 @@ export class VectorRag {
     const fetchLimit = Math.max(this.config.embeddings.chunkMessages * params.limitChunks * 2, 500);
     let totalChars = 0;
     let truncatedByCharBudget = false;
+    let bufferHasNewMessages = false;
+    const overlapMessages = Math.min(
+      this.config.embeddings.chunkOverlapMessages,
+      Math.max(0, this.config.embeddings.chunkMessages - 1),
+    );
 
-    const flush = (): void => {
+    const bufferTextLength = (messages: StoredMessage[]): number =>
+      messages.reduce((sum, message, index) => sum + formatMessageForChunk(message, this.config.embeddings.chunkMaxChars).length + (index > 0 ? 1 : 0), 0);
+
+    const flush = (retainOverlap: boolean): void => {
       if (buffer.length === 0 || chunks.length >= params.limitChunks) {
         return;
       }
       const first = buffer[0]!;
       const last = buffer[buffer.length - 1]!;
-      const text = buffer.map(formatMessage).join("\n");
+      const text = buffer.map((message) => formatMessageForChunk(message, this.config.embeddings.chunkMaxChars)).join("\n");
       chunks.push({
         chatId,
         startMessageId: first.messageId,
@@ -338,8 +370,9 @@ export class VectorRag {
         text,
       });
       totalChars += text.length;
-      buffer = [];
-      bufferChars = 0;
+      buffer = retainOverlap && overlapMessages > 0 ? buffer.slice(-overlapMessages) : [];
+      bufferChars = bufferTextLength(buffer);
+      bufferHasNewMessages = false;
     };
 
     outer: while (chunks.length < params.limitChunks && !truncatedByCharBudget) {
@@ -361,10 +394,15 @@ export class VectorRag {
       }
 
       for (const message of messages) {
-        const formatted = formatMessage(message);
+        const formatted = formatMessageForChunk(message, this.config.embeddings.chunkMaxChars);
         let additionalChars = formatted.length + (buffer.length > 0 ? 1 : 0);
         if (buffer.length > 0 && bufferChars + additionalChars > this.config.embeddings.chunkMaxChars) {
-          flush();
+          if (bufferHasNewMessages) {
+            flush(false);
+          } else {
+            buffer = [];
+            bufferChars = 0;
+          }
           additionalChars = formatted.length;
         }
         if (chunks.length >= params.limitChunks) {
@@ -376,9 +414,10 @@ export class VectorRag {
         }
         cursor = message.messageId;
         buffer.push(message);
+        bufferHasNewMessages = true;
         bufferChars += additionalChars;
         if (buffer.length >= this.config.embeddings.chunkMessages) {
-          flush();
+          flush(true);
         }
       }
 
@@ -386,7 +425,9 @@ export class VectorRag {
         break;
       }
     }
-    flush();
+    if (bufferHasNewMessages) {
+      flush(false);
+    }
     return { chunks: chunks.slice(0, params.limitChunks), truncatedByCharBudget };
   }
 
@@ -421,8 +462,37 @@ export function formatMessage(message: StoredMessage): string {
   return `[${message.messageId} ${date}] ${sender}: ${text}`;
 }
 
+function formatMessageForChunk(message: StoredMessage, maxChars: number): string {
+  const formatted = formatMessage(message);
+  if (formatted.length <= maxChars) {
+    return formatted;
+  }
+  const marker = " [truncated]";
+  if (maxChars <= marker.length) {
+    return formatted.slice(0, maxChars);
+  }
+  return `${formatted.slice(0, maxChars - marker.length)}${marker}`;
+}
+
 function reciprocalRank(index: number): number {
   return 1 / (60 + index + 1);
+}
+
+function mergeHybridHit<T extends Omit<HybridSearchHit, "rank" | "source"> & { bestRank: number }>(
+  existing: T | undefined,
+  incoming: T,
+): T {
+  if (!existing) {
+    return incoming;
+  }
+  return {
+    ...existing,
+    ...Object.fromEntries(Object.entries(incoming).filter(([, value]) => value != null)),
+    sources: [...new Set([...existing.sources, ...incoming.sources])],
+    score: existing.score + incoming.score,
+    bestRank: Math.min(existing.bestRank, incoming.bestRank),
+    text: existing.text || incoming.text,
+  } as T;
 }
 
 function embeddingProvider(baseUrl: string): string {

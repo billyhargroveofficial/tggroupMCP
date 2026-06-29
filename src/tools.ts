@@ -239,6 +239,7 @@ export class TelegramTools {
         maxRetries: this.config.embeddings.maxRetries,
         retryInitialMs: this.config.embeddings.retryInitialMs,
         chunkMessages: this.config.embeddings.chunkMessages,
+        chunkOverlapMessages: this.config.embeddings.chunkOverlapMessages,
         chunkMaxChars: this.config.embeddings.chunkMaxChars,
         tickChunkLimit: this.config.embeddings.tickChunkLimit,
         maxChunksPerRun: this.config.embeddings.maxChunksPerRun,

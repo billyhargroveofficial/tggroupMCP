@@ -53,6 +53,7 @@ export const NUMERIC_ENV_RULES = {
   TELEGRAM_EMBEDDINGS_MAX_RETRIES: { fallback: 2, min: 0, max: 10 },
   TELEGRAM_EMBEDDINGS_RETRY_INITIAL_MS: { fallback: 1_000, min: 0, max: 60 * 60_000 },
   TELEGRAM_EMBEDDINGS_CHUNK_MESSAGES: { fallback: 12, min: 1, max: 1_000 },
+  TELEGRAM_EMBEDDINGS_CHUNK_OVERLAP_MESSAGES: { fallback: 0, min: 0, max: 1_000 },
   TELEGRAM_EMBEDDINGS_CHUNK_MAX_CHARS: { fallback: 1600, min: 1, max: 200_000 },
   TELEGRAM_EMBEDDINGS_TICK_CHUNK_LIMIT: { fallback: 100, min: 1, max: 100_000 },
   TELEGRAM_EMBEDDINGS_MAX_CHUNKS_PER_RUN: { fallback: 1_000, min: 1, max: 100_000 },
@@ -158,6 +159,7 @@ export type AppConfig = {
     maxRetries: number;
     retryInitialMs: number;
     chunkMessages: number;
+    chunkOverlapMessages: number;
     chunkMaxChars: number;
     tickChunkLimit: number;
     maxChunksPerRun: number;
@@ -243,6 +245,7 @@ export function loadConfig(): AppConfig {
       maxRetries: intFromEnv("TELEGRAM_EMBEDDINGS_MAX_RETRIES"),
       retryInitialMs: intFromEnv("TELEGRAM_EMBEDDINGS_RETRY_INITIAL_MS"),
       chunkMessages: intFromEnv("TELEGRAM_EMBEDDINGS_CHUNK_MESSAGES"),
+      chunkOverlapMessages: intFromEnv("TELEGRAM_EMBEDDINGS_CHUNK_OVERLAP_MESSAGES"),
       chunkMaxChars: intFromEnv("TELEGRAM_EMBEDDINGS_CHUNK_MAX_CHARS"),
       tickChunkLimit: intFromEnv("TELEGRAM_EMBEDDINGS_TICK_CHUNK_LIMIT"),
       maxChunksPerRun: intFromEnv("TELEGRAM_EMBEDDINGS_MAX_CHUNKS_PER_RUN"),
@@ -300,6 +303,7 @@ export function redactedConfig(config: AppConfig): Record<string, unknown> {
       maxRetries: config.embeddings.maxRetries,
       retryInitialMs: config.embeddings.retryInitialMs,
       chunkMessages: config.embeddings.chunkMessages,
+      chunkOverlapMessages: config.embeddings.chunkOverlapMessages,
       chunkMaxChars: config.embeddings.chunkMaxChars,
       tickChunkLimit: config.embeddings.tickChunkLimit,
       maxChunksPerRun: config.embeddings.maxChunksPerRun,

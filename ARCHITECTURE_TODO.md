@@ -627,6 +627,15 @@ Acceptance criteria:
 
 ### 20. Improve hybrid ranking and chunking
 
+Status 2026-06-29: Completed. Hybrid results now use reciprocal-rank fusion only, merge duplicate keyword/vector evidence when a keyword hit is inside a vector chunk, expose `source:"hybrid"` plus contributing `sources`, and rank overlapping evidence above single-source hits predictably. Chunking now supports configurable `TELEGRAM_EMBEDDINGS_CHUNK_OVERLAP_MESSAGES`, stores overlapping exact memberships, and truncates formatted single-message chunk text to `TELEGRAM_EMBEDDINGS_CHUNK_MAX_CHARS` with a marker so long messages cannot silently exceed the configured chunk size. Exact `messageIds`, start/end ids, and source fields explain chunk and hybrid boundaries; topic/reply-aware chunking remains an optional future enhancement rather than required for correctness.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec` (59 passed)
+- `npm run check`
+- `npm run print-config`
+- `npm run validate-config`
+
 Problem:
 Hybrid ranking simply mixes reciprocal rank with raw cosine. Chunking ignores topic/reply boundaries, has no overlap, and long messages can exceed `chunkMaxChars`.
 
