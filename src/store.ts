@@ -1006,51 +1006,55 @@ export class MessageStore {
     });
   }
 
-  markSendSending(outboxId: string, nowMs = Date.now()): void {
-    this.writeWithRetry("markSendSending", () => {
-      this.db
+  markSendSending(outboxId: string, nowMs = Date.now()): boolean {
+    return this.writeWithRetry("markSendSending", () => {
+      const result = this.db
         .prepare(
           `UPDATE send_outbox
            SET status = 'sending', sending_at_ms = ?, updated_at_ms = ?
            WHERE id = ? AND status = 'queued'`,
         )
         .run(nowMs, nowMs, outboxId);
+      return result.changes > 0;
     });
   }
 
-  markSendSent(outboxId: string, telegramMessageId: number | undefined, nowMs = Date.now()): void {
-    this.writeWithRetry("markSendSent", () => {
-      this.db
+  markSendSent(outboxId: string, telegramMessageId: number | undefined, nowMs = Date.now()): boolean {
+    return this.writeWithRetry("markSendSent", () => {
+      const result = this.db
         .prepare(
           `UPDATE send_outbox
            SET status = 'sent', telegram_message_id = ?, sent_at_ms = ?, updated_at_ms = ?, error = NULL
-           WHERE id = ?`,
+           WHERE id = ? AND status = 'sending'`,
         )
         .run(telegramMessageId ?? null, nowMs, nowMs, outboxId);
+      return result.changes > 0;
     });
   }
 
-  markSendFailed(outboxId: string, error: string, nowMs = Date.now()): void {
-    this.writeWithRetry("markSendFailed", () => {
-      this.db
+  markSendFailed(outboxId: string, error: string, nowMs = Date.now()): boolean {
+    return this.writeWithRetry("markSendFailed", () => {
+      const result = this.db
         .prepare(
           `UPDATE send_outbox
            SET status = 'failed', error = ?, updated_at_ms = ?
-           WHERE id = ?`,
+           WHERE id = ? AND status IN ('queued', 'sending')`,
         )
         .run(error, nowMs, outboxId);
+      return result.changes > 0;
     });
   }
 
-  markSendExpired(outboxId: string, error = "Queued send expired before execution.", nowMs = Date.now()): void {
-    this.writeWithRetry("markSendExpired", () => {
-      this.db
+  markSendExpired(outboxId: string, error = "Queued send expired before execution.", nowMs = Date.now()): boolean {
+    return this.writeWithRetry("markSendExpired", () => {
+      const result = this.db
         .prepare(
           `UPDATE send_outbox
            SET status = 'expired', error = ?, updated_at_ms = ?
-           WHERE id = ?`,
+           WHERE id = ? AND status = 'queued'`,
         )
         .run(error, nowMs, outboxId);
+      return result.changes > 0;
     });
   }
 

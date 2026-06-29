@@ -414,7 +414,23 @@ Important operating rule:
 
 ## P2 - Correctness, Durability, And Operator Trust
 
-- [ ] 11. Guard send outbox state transitions.
+- [x] 11. Guard send outbox state transitions.
+
+  Status 2026-06-29: Completed. Send outbox state updates are now conditional and return whether the transition
+  actually changed a row. `queued -> sending` must win before Telegram dispatch; if the row is missing, expired, or no
+  longer queued, the throttler rejects before calling Telegram. `sending -> sent` and active-to-failed updates refuse
+  to overwrite terminal rows, and queued expiry only updates queued rows. Audit failures after a Telegram send are
+  still surfaced explicitly instead of silently mutating terminal state.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/send-safety.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   `markSendSending()` does not verify that a queued row was actually transitioned before Telegram send starts. Sent/failed/expired updates can overwrite terminal states.

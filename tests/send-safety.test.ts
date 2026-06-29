@@ -351,6 +351,65 @@ test("queued sends expire before execution", async () => {
   assert.equal(telegram.sends.length, 1);
 });
 
+test("stale queued transition aborts before Telegram dispatch", async () => {
+  const telegram = new FakeTelegram();
+  let releaseFirst!: () => void;
+  let markFirstStarted!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const firstStarted = new Promise<void>((resolve) => {
+    markFirstStarted = resolve;
+  });
+  telegram.onSend = async (callNumber) => {
+    if (callNumber === 1) {
+      markFirstStarted();
+      await firstGate;
+    }
+  };
+  const { tools, store } = makeTools(telegram, {
+    throttle: {
+      userCooldownMs: 0,
+      maxAgeMs: 60_000,
+      globalConcurrency: 1,
+      maxRunningPerChat: 1,
+    },
+  });
+
+  const firstPreview = await callTool(tools, "preview_message", {
+    text: "first stale guard",
+  });
+  const secondPreview = await callTool(tools, "preview_message", {
+    text: "second stale guard",
+  });
+  const firstSend = callTool(tools, "send_message", {
+    text: "first stale guard",
+    dry_run: false,
+    approval_id: firstPreview.approval_id,
+    dedupe_key: "dedupe/stale-first",
+  });
+  await firstStarted;
+
+  const secondSend = callTool(tools, "send_message", {
+    text: "second stale guard",
+    dry_run: false,
+    approval_id: secondPreview.approval_id,
+    dedupe_key: "dedupe/stale-second",
+  });
+  const queued = await waitForSendOutbox(store, "dedupe/stale-second");
+  assert.equal(store.markSendExpired(queued.id, "manually expired before dispatch"), true);
+
+  releaseFirst();
+
+  assert.equal((await firstSend).ok, true);
+  const stale = await secondSend;
+  assert.equal(stale.ok, false);
+  assert.equal((stale.error as { category: string }).category, "rate_limit");
+  assert.match((stale.error as { message: string }).message, /no longer queued/);
+  assert.equal(store.getSendOutboxByDedupeKey("dedupe/stale-second")?.status, "expired");
+  assert.equal(telegram.sends.length, 1);
+});
+
 test("persisted cooldown uses server-owned caller identity", async () => {
   const telegram = new FakeTelegram();
   const { tools } = makeTools(telegram, {
@@ -435,6 +494,33 @@ test("ambiguous in-flight send is not retried after restart", async (t) => {
   assert.equal((retried.error as { category: string }).category, "internal");
   assert.match((retried.error as { message: string }).message, /unknown Telegram delivery state/);
   assert.equal(telegram.sends.length, 0);
+});
+
+test("terminal send outbox states are not overwritten by later transitions", () => {
+  const store = new MessageStore(":memory:");
+  const sentId = seedSend(store, "sent", "terminal/sent");
+  const failedId = seedSend(store, "failed", "terminal/failed", "original failure");
+  const expiredId = seedSend(store, "expired", "terminal/expired", "original expiry");
+
+  assert.equal(store.markSendFailed(sentId, "late failure", 2000), false);
+  assert.equal(store.markSendExpired(sentId, "late expiry", 2001), false);
+  assert.equal(store.getSendOutboxByDedupeKey("terminal/sent")?.status, "sent");
+  assert.equal(store.getSendOutboxByDedupeKey("terminal/sent")?.error, undefined);
+
+  assert.equal(store.markSendSent(failedId, 9002, 2002), false);
+  assert.equal(store.markSendExpired(failedId, "late expiry", 2003), false);
+  assert.equal(store.markSendFailed(failedId, "late failure", 2004), false);
+  const failed = store.getSendOutboxByDedupeKey("terminal/failed");
+  assert.equal(failed?.status, "failed");
+  assert.equal(failed?.error, "original failure");
+
+  assert.equal(store.markSendSending(expiredId, 2005), false);
+  assert.equal(store.markSendSent(expiredId, 9003, 2006), false);
+  assert.equal(store.markSendFailed(expiredId, "late failure", 2007), false);
+  assert.equal(store.markSendExpired(expiredId, "late expiry", 2008), false);
+  const expired = store.getSendOutboxByDedupeKey("terminal/expired");
+  assert.equal(expired?.status, "expired");
+  assert.equal(expired?.error, "original expiry");
 });
 
 function makeTools(
@@ -528,12 +614,23 @@ function tempDbPath(t: { after(fn: () => void): void }): string {
   return join(dir, "messages.sqlite");
 }
 
+async function waitForSendOutbox(store: MessageStore, dedupeKey: string) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const item = store.getSendOutboxByDedupeKey(dedupeKey);
+    if (item) {
+      return item;
+    }
+    await sleep(5);
+  }
+  throw new Error(`Timed out waiting for send outbox row ${dedupeKey}`);
+}
+
 function seedSend(
   store: MessageStore,
   status: "queued" | "sending" | "sent" | "failed" | "expired",
   dedupeKey: string,
   error?: string,
-): void {
+): string {
   const reservation = store.reserveSend({
     outboxId: `seed/${dedupeKey}`,
     dedupeKey,
@@ -548,13 +645,14 @@ function seedSend(
   });
   assert.equal(reservation.kind, "queued");
   if (status === "sending" || status === "sent") {
-    store.markSendSending(reservation.outboxId, 1001);
+    assert.equal(store.markSendSending(reservation.outboxId, 1001), true);
   }
   if (status === "sent") {
-    store.markSendSent(reservation.outboxId, 9001, 1002);
+    assert.equal(store.markSendSent(reservation.outboxId, 9001, 1002), true);
   } else if (status === "failed") {
-    store.markSendFailed(reservation.outboxId, error ?? "failed", 1002);
+    assert.equal(store.markSendFailed(reservation.outboxId, error ?? "failed", 1002), true);
   } else if (status === "expired") {
-    store.markSendExpired(reservation.outboxId, error ?? "expired", 1002);
+    assert.equal(store.markSendExpired(reservation.outboxId, error ?? "expired", 1002), true);
   }
+  return reservation.outboxId;
 }

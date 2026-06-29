@@ -98,7 +98,11 @@ export class SendThrottler {
       }
 
       try {
-        this.store.markSendSending(job.outboxId);
+        if (!this.store.markSendSending(job.outboxId)) {
+          job.reject(staleSendTransitionError());
+          this.releaseRunningJob(job);
+          continue;
+        }
       } catch (error) {
         job.reject(error);
         this.releaseRunningJob(job);
@@ -109,7 +113,9 @@ export class SendThrottler {
         .then(
           (sent) => {
             try {
-              this.store.markSendSent(job.outboxId, sent.id);
+              if (!this.store.markSendSent(job.outboxId, sent.id)) {
+                throw new Error("outbox row was no longer in sending state");
+              }
               job.resolve(sent);
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
@@ -121,7 +127,9 @@ export class SendThrottler {
             this.rememberRateLimit(job.chatId, normalized);
             const message = normalized.message;
             try {
-              this.store.markSendFailed(job.outboxId, message);
+              if (!this.store.markSendFailed(job.outboxId, message)) {
+                throw new Error("outbox row was already terminal or missing");
+              }
               job.reject(error);
             } catch (auditError) {
               const auditMessage = auditError instanceof Error ? auditError.message : String(auditError);
@@ -223,4 +231,12 @@ export class SendThrottler {
       this.schedule();
     }, Math.max(1, notBeforeMs - nowMs));
   }
+}
+
+function staleSendTransitionError(): ToolError {
+  return new ToolError({
+    category: "rate_limit",
+    retryable: true,
+    message: "Reserved send is no longer queued; refusing to dispatch it to Telegram.",
+  });
 }
