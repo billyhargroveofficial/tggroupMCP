@@ -351,7 +351,7 @@ test("queued sends expire before execution", async () => {
   assert.equal(telegram.sends.length, 1);
 });
 
-test("caller-supplied user_key cannot bypass persisted cooldown", async () => {
+test("persisted cooldown uses server-owned caller identity", async () => {
   const telegram = new FakeTelegram();
   const { tools } = makeTools(telegram, {
     throttle: { userCooldownMs: 60_000 },
@@ -363,7 +363,6 @@ test("caller-supplied user_key cannot bypass persisted cooldown", async () => {
     text: "cooldown one",
     dry_run: false,
     approval_id: firstPreview.approval_id,
-    user_key: "caller-a",
   });
 
   assert.equal(firstSend.ok, true);
@@ -375,7 +374,6 @@ test("caller-supplied user_key cannot bypass persisted cooldown", async () => {
     text: "cooldown two",
     dry_run: false,
     approval_id: secondPreview.approval_id,
-    user_key: "caller-b",
   });
 
   assert.equal(secondSend.ok, false);

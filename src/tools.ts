@@ -16,7 +16,8 @@ type ToolDef = {
   inputSchema: Record<string, unknown>;
 };
 
-const chatSchema = z.object({ chat: z.string().optional() });
+const emptySchema = z.object({}).strict();
+const chatSchema = z.object({ chat: z.string().optional() }).strict();
 const limitSchema = z.number().int().positive();
 const SERVER_SEND_USER_KEY = "mcp-server";
 
@@ -195,6 +196,7 @@ export class TelegramTools {
     try {
       switch (name) {
         case "get_config":
+          emptySchema.parse(rawArgs ?? {});
           return jsonTool(ok({ config: this.safeConfig() }));
         case "get_status":
           return jsonTool(this.getStatus(rawArgs));
@@ -307,7 +309,7 @@ export class TelegramTools {
   }
 
   private async resolveChat(rawArgs: unknown): Promise<Record<string, unknown>> {
-    const args = chatSchema.extend({ refresh: z.boolean().optional() }).parse(rawArgs ?? {});
+    const args = chatSchema.extend({ refresh: z.boolean().optional() }).strict().parse(rawArgs ?? {});
     const resolved = await this.telegram.resolveChat(args.chat, args.refresh);
     this.store.upsertChat(resolved.info);
     return ok({ chat: resolved.info });
@@ -330,6 +332,7 @@ export class TelegramTools {
         commit_cursor: z.boolean().optional(),
         reset_backfill_exhausted: z.boolean().default(false),
       })
+      .strict()
       .parse(rawArgs ?? {});
 
     if (args.mode === "both") {
@@ -367,6 +370,7 @@ export class TelegramTools {
         after_id: z.number().int().positive().optional(),
         order: z.enum(["asc", "desc"]).default("desc"),
       })
+      .strict()
       .parse(rawArgs ?? {});
     const chat = this.cacheChat(args.chat);
     const messages = this.store.getHistory({
@@ -407,6 +411,7 @@ export class TelegramTools {
         before_id: z.number().int().positive().optional(),
         after_id: z.number().int().positive().optional(),
       })
+      .strict()
       .parse(rawArgs ?? {});
     const chat = this.cacheChat(args.chat);
     const keywordLimit = args.keyword_limit ?? args.limit;
@@ -459,6 +464,7 @@ export class TelegramTools {
         after_id: z.number().int().positive().optional(),
         include_messages: z.boolean().default(true),
       })
+      .strict()
       .parse(rawArgs ?? {});
     const chat = this.cacheChat(args.chat);
     return ok({
@@ -484,6 +490,7 @@ export class TelegramTools {
         estimate_only: z.boolean().default(false),
         confirm_estimate: z.boolean().default(false),
       })
+      .strict()
       .parse(rawArgs ?? {});
     const chat = this.cacheChat(args.chat);
     const estimate = this.vectorRag.estimateIndexCachedMessages({
@@ -522,6 +529,7 @@ export class TelegramTools {
         before: z.number().int().nonnegative().max(500).default(25),
         after: z.number().int().nonnegative().max(500).default(25),
       })
+      .strict()
       .parse(rawArgs ?? {});
     const chat = this.cacheChat(args.chat);
     const messages = this.store.getThreadContext({
@@ -562,6 +570,7 @@ export class TelegramTools {
         link_preview: z.boolean().optional(),
         silent: z.boolean().optional(),
       })
+      .strict()
       .parse(rawArgs ?? {});
     const resolved = await this.telegram.resolveChat(args.chat);
     this.store.upsertChat(resolved.info);
@@ -603,6 +612,7 @@ export class TelegramTools {
         approval_id: z.string().optional(),
         dedupe_key: z.string().optional(),
       })
+      .strict()
       .parse(rawArgs ?? {});
 
     const resolved = await this.telegram.resolveChat(args.chat);
@@ -670,6 +680,7 @@ export class TelegramTools {
         approval_id: z.string().optional(),
         dedupe_key: z.string().optional(),
       })
+      .strict()
       .parse(rawArgs ?? {});
     return this.sendMessage({
       chat: args.chat,

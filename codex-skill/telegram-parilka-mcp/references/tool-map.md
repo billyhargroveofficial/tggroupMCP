@@ -43,10 +43,17 @@ or normalized errors:
 }
 ```
 
+Runtime argument validation is strict. Unknown input keys are not ignored; they return `ok:false` with
+`error.category:"validation"` and a `fields[].path` entry naming the unknown key.
+
 `sync_history` uses explicit status values:
 
 ```json
 { "ok": true, "status": "done", "chat": { "chatId": "-1003179772905" }, "stats": {}, "result": {} }
+```
+
+```json
+{ "ok": true, "status": "catching_up", "chat": { "chatId": "-1003179772905" }, "result": { "status": "catching_up", "catchup": {} } }
 ```
 
 ```json

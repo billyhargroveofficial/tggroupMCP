@@ -244,7 +244,22 @@ Important operating rule:
   - Already stored pages are not refetched forever.
   - Status reports a clear `catching_up` or equivalent state instead of repeated generic failures.
 
-- [ ] 7. Make runtime tool validation match MCP schemas.
+- [x] 7. Make runtime tool validation match MCP schemas.
+
+  Status 2026-06-29: Completed. Runtime tool argument schemas are now strict, including `get_config`, so unknown
+  keys are rejected instead of stripped. Zod `unrecognized_keys` issues are normalized into per-field validation
+  entries whose `fields[].path` names the offending key. Tests cover representative read, sync, search, index,
+  preview, and send tools, including stale caller-owned `user_key`. Tool docs now state that unknown input keys return
+  `ok:false` validation errors, and JSON schemas continue to advertise `additionalProperties:false`.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/tools-response.test.ts --test-reporter=spec`
+  - `node --test --import tsx tests/send-safety.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm test`
+  - `npm run smoke:mcp`
+  - `npm run secret-scan`
 
   Problem:
   Tool schemas advertise `additionalProperties:false`, but runtime Zod schemas strip unknown keys. Typos such as `befor_id` can be silently ignored while returning `ok:true`.

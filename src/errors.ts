@@ -28,10 +28,7 @@ export function normalizeError(error: unknown): NormalizedError {
       category: "validation",
       retryable: false,
       message: "Invalid tool arguments.",
-      fields: error.issues.map((issue) => ({
-        path: issue.path.join("."),
-        message: issue.message,
-      })),
+      fields: error.issues.flatMap((issue) => zodIssueFields(issue)),
     };
   }
 
@@ -132,6 +129,21 @@ export function normalizeError(error: unknown): NormalizedError {
     retryable: false,
     message,
   };
+}
+
+function zodIssueFields(issue: ZodError["issues"][number]): Array<{ path: string; message: string }> {
+  if (issue.code === "unrecognized_keys") {
+    return issue.keys.map((key) => ({
+      path: [...issue.path.map(String), key].join("."),
+      message: `Unrecognized key: ${key}`,
+    }));
+  }
+  return [
+    {
+      path: issue.path.join("."),
+      message: issue.message,
+    },
+  ];
 }
 
 function retryAfterSeconds(value: unknown): number | undefined {
