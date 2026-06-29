@@ -19,6 +19,13 @@ Environment precedence is handled by TypeScript config with dotenv parsing:
 3. `TELEGRAM_ENV_PATH` is parsed second; default is `<project>/.env` from the current working directory. It can override
    values from the shared dotenv file, but not real process environment variables.
 
+Common local env variants, logs, SQLite files, session dumps, and backup/dump files are ignored by git. Keep
+`.env.example` tracked. Before pushing release or ops changes, run:
+
+```bash
+npm run secret-scan
+```
+
 ## Session Generation
 
 ```bash

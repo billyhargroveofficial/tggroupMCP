@@ -29,5 +29,8 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Secret scan
+        run: npm run secret-scan
+
       - name: MCP smoke
         run: npm run smoke:mcp

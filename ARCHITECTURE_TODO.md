@@ -762,6 +762,15 @@ Acceptance criteria:
 
 ### 24. Expand secret/log ignore and scan hygiene
 
+Status 2026-06-29: Completed. `.gitignore` now covers common dotenv variants while explicitly keeping `.env.example` trackable, SQLite journals/DB aliases, logs, session/StringSession dumps, sessions directories, dump files, and backup files. Added `npm run secret-scan`, a high-confidence source scan over tracked plus untracked non-ignored files that reports redacted locations for OpenAI-compatible API keys, Telegram API hashes, Telegram StringSession values, and private key blocks. CI now runs the secret scan after tests, and the runbook includes the local command as a release/ops hygiene check.
+
+Verification 2026-06-29:
+
+- `npm run secret-scan`
+- `npm run check`
+- `npm test -- --test-reporter=spec` (61 passed)
+- `npm run smoke:mcp`
+
 Problem:
 `.gitignore` covers `.env` and SQLite, but not common variants like `.env.local`, `.env.production`, session dumps, or logs.
 
