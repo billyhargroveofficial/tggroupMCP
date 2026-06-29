@@ -942,7 +942,7 @@ Important operating rule:
   explicitly, sets a known `PATH`, pins Node through `TELEGRAM_NODE=/usr/bin/node`, and still performs the build
   freshness preflight before daemon startup. The sync-daemon wrapper honors `TELEGRAM_NODE` so systemd does not depend
   on ambient PATH to find Node. The runbook now documents exact install, `systemd-analyze verify`, restart, status,
-  logs, rollback, and removal commands. Live installation/restart and daemon-status proof remain tracked by P3.27.
+  logs, rollback, and removal commands. Live installation/restart and daemon-status proof were completed in P3.27.
 
   Verification 2026-06-29:
 
@@ -1055,7 +1055,32 @@ Important operating rule:
   - Regex changes cannot silently stop detecting supported secret classes.
   - Secret values are never printed in test failures.
 
-- [ ] 27. Restart or redeploy the live daemon after build changes.
+- [x] 27. Restart or redeploy the live daemon after build changes.
+
+  Status 2026-06-29: Completed. The stale live user service (old PID `1701475`, started before the latest `dist`
+  rebuilds) was replaced with the persistent system unit shipped in P2.24. Deployment ran `npm run build`,
+  `npm run smoke:mcp:wrapper`, `systemd-analyze verify`, installed
+  `/etc/systemd/system/telegram-parilka-mcp-sync.service`, disabled/stopped the old user service, and enabled/started
+  the system service. The active live daemon is now system unit PID `2021836` running
+  `/usr/bin/node /root/telegram-parilka-mcp/dist/sync-daemon.js`; the old user unit is disabled and inactive. After the
+  first tick, `npm run status` returned `health.status:"ok"` with non-null daemon status:
+  `lastStartedAt:"2026-06-29 13:06:01"`, `lastSuccessAt:"2026-06-29 13:06:02"`, and `consecutiveFailures:0`.
+
+  Verification 2026-06-29:
+
+  - `npm run build`
+  - `npm run smoke:mcp:wrapper`
+  - `systemd-analyze verify systemd/telegram-parilka-mcp-sync.service`
+  - `install -m 0644 /root/telegram-parilka-mcp/systemd/telegram-parilka-mcp-sync.service /etc/systemd/system/telegram-parilka-mcp-sync.service`
+  - `systemd-analyze verify /etc/systemd/system/telegram-parilka-mcp-sync.service`
+  - `systemctl daemon-reload`
+  - `systemctl --user disable --now telegram-parilka-mcp-sync.service`
+  - `systemctl enable --now telegram-parilka-mcp-sync.service`
+  - `systemctl status telegram-parilka-mcp-sync.service --no-pager`
+  - `systemctl --user status telegram-parilka-mcp-sync.service --no-pager` showed disabled/inactive
+  - `pgrep -af 'telegram-parilka-mcp-sync-daemon|dist/sync-daemon|src/sync-daemon|tsx src/sync-daemon'` showed only
+    system daemon PID `2021836` plus the probe command
+  - `npm run status`
 
   Problem:
   The live systemd process was started before the latest `dist` rebuild, so the new daemon status writer was not active even though source and local `dist` had been updated. Live `get_status` showed fresh sync timestamps but `daemon:null`.
