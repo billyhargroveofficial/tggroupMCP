@@ -369,9 +369,12 @@ function makeTools(
         batchSize: 100,
         maxSyncLimit: 500_000,
         floodWaitMaxSleepSec: 10,
+        historyWaitTimeSec: 1,
         intervalMs: 60_000,
         recentLimit: 300,
         backfillLimit: 1000,
+        transientBackoffInitialMs: 5_000,
+        transientBackoffMaxMs: 300_000,
       },
       embeddings: {
         enabled: false,

@@ -72,6 +72,24 @@ export function normalizeError(error: unknown): NormalizedError {
       message,
     };
   }
+  if (
+    upper.includes("ECONNRESET") ||
+    upper.includes("ECONNREFUSED") ||
+    upper.includes("ETIMEDOUT") ||
+    upper.includes("EAI_AGAIN") ||
+    upper.includes("TIMEOUT") ||
+    upper.includes("NETWORK") ||
+    upper.includes("CONNECTION") ||
+    upper.includes("SOCKET")
+  ) {
+    return {
+      category: "internal",
+      telegramCode: anyError?.code,
+      telegramType: upper,
+      retryable: true,
+      message,
+    };
+  }
   if (upper.includes("USERNAME") || upper.includes("PEER") || upper.includes("CHANNEL_INVALID")) {
     return {
       category: "peer",

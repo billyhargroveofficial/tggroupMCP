@@ -119,6 +119,14 @@ Acceptance criteria:
 
 ### 4. Wire Telegram flood/rate controls end to end
 
+Status 2026-06-29: Completed. GramJS client options now include `floodSleepThreshold` from `TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC`, history iteration receives configurable `TELEGRAM_HISTORY_WAIT_TIME_SEC`, and the daemon computes its next sleep from normalized sync errors. `FLOOD_WAIT_*` / `SLOWMODE_WAIT_*` retry-after values delay the next tick for at least the requested duration, transient network/socket/timeouts use exponential backoff, and permanent auth errors stop the daemon instead of restart-looping inside the process. Redacted config includes the flood, wait-time, and backoff settings.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+- `npm run print-config`
+
 Problem:
 `TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC` is loaded but not wired into GramJS client options or daemon sleep policy. `FLOOD_WAIT` can be normalized but the daemon continues on the ordinary interval.
 

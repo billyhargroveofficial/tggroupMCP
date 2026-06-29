@@ -12,7 +12,7 @@ const CHAT: ChatInfo = {
 };
 
 class FakeTelegram {
-  readonly requests: Array<{ limit: number; offsetId?: number; minId?: number }> = [];
+  readonly requests: Array<{ limit: number; offsetId?: number; minId?: number; waitTime?: number }> = [];
   throwAfterTotal: number | undefined;
   private yieldedTotal = 0;
 
@@ -26,6 +26,7 @@ class FakeTelegram {
     limit: number;
     offsetId?: number;
     minId?: number;
+    waitTime?: number;
   }): Promise<{ chat: ChatInfo; messages: AsyncIterable<Record<string, unknown>> }> {
     this.requests.push(params);
     const minId = params.minId ?? 0;
@@ -80,6 +81,10 @@ test("recent sync catches up all pages above the previous newest id", async () =
   assert.deepEqual(
     telegram.requests.map((request) => request.offsetId ?? 0),
     [0, 1201],
+  );
+  assert.deepEqual(
+    telegram.requests.map((request) => request.waitTime),
+    [2, 2],
   );
 });
 
@@ -180,9 +185,12 @@ function config(): AppConfig {
       batchSize: 100,
       maxSyncLimit: 500_000,
       floodWaitMaxSleepSec: 10,
+      historyWaitTimeSec: 2,
       intervalMs: 60_000,
       recentLimit: 300,
       backfillLimit: 1000,
+      transientBackoffInitialMs: 5_000,
+      transientBackoffMaxMs: 300_000,
     },
     embeddings: {
       enabled: false,

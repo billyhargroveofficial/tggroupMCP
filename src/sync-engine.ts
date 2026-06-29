@@ -115,6 +115,7 @@ export class HistorySyncer {
               limit: target,
               offsetId: pageOffsetId,
               minId,
+              waitTime: this.config.sync.historyWaitTimeSec,
             });
             let pageFetched = 0;
             let pageOldestMessageId: number | undefined;
@@ -161,6 +162,7 @@ export class HistorySyncer {
             limit: target,
             offsetId,
             minId,
+            waitTime: this.config.sync.historyWaitTimeSec,
           });
 
           for await (const message of stream.messages) {

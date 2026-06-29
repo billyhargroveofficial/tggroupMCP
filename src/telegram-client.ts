@@ -50,10 +50,12 @@ export class TelegramService {
     }
 
     const session = new StringSession(this.config.telegram.session);
-    const client = new TelegramClient(session, this.config.telegram.apiId, this.config.telegram.apiHash, {
-      connectionRetries: this.config.telegram.connectionRetries,
-      baseLogger: new StderrGramJsLogger(),
-    });
+    const client = new TelegramClient(
+      session,
+      this.config.telegram.apiId,
+      this.config.telegram.apiHash,
+      telegramClientOptions(this.config) as never,
+    );
     await client.connect();
     this.client = client;
     return client;
@@ -159,6 +161,14 @@ export class TelegramService {
 
     return { chat: resolved.info, messages };
   }
+}
+
+export function telegramClientOptions(config: AppConfig): Record<string, unknown> {
+  return {
+    connectionRetries: config.telegram.connectionRetries,
+    floodSleepThreshold: config.sync.floodWaitMaxSleepSec,
+    baseLogger: new StderrGramJsLogger(),
+  };
 }
 
 function setIfDefined(target: Record<string, unknown>, key: string, value: unknown): void {

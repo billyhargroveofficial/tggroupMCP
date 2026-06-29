@@ -80,9 +80,12 @@ export type AppConfig = {
     batchSize: number;
     maxSyncLimit: number;
     floodWaitMaxSleepSec: number;
+    historyWaitTimeSec: number;
     intervalMs: number;
     recentLimit: number;
     backfillLimit: number;
+    transientBackoffInitialMs: number;
+    transientBackoffMaxMs: number;
   };
   embeddings: {
     enabled: boolean;
@@ -155,9 +158,12 @@ export function loadConfig(): AppConfig {
       batchSize: intFromEnv("TELEGRAM_HISTORY_BATCH_SIZE", 100),
       maxSyncLimit: intFromEnv("TELEGRAM_MAX_SYNC_LIMIT", 500_000),
       floodWaitMaxSleepSec: intFromEnv("TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC", 10),
+      historyWaitTimeSec: intFromEnv("TELEGRAM_HISTORY_WAIT_TIME_SEC", 1),
       intervalMs: intFromEnv("TELEGRAM_SYNC_INTERVAL_MS", 60_000),
       recentLimit: intFromEnv("TELEGRAM_SYNC_RECENT_LIMIT", 300),
       backfillLimit: intFromEnv("TELEGRAM_SYNC_BACKFILL_LIMIT", 1_000),
+      transientBackoffInitialMs: intFromEnv("TELEGRAM_SYNC_BACKOFF_INITIAL_MS", 5_000),
+      transientBackoffMaxMs: intFromEnv("TELEGRAM_SYNC_BACKOFF_MAX_MS", 5 * 60_000),
     },
     embeddings: {
       enabled: boolFromEnv("TELEGRAM_EMBEDDINGS_ENABLED", false),
