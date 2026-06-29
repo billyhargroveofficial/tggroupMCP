@@ -935,7 +935,27 @@ Important operating rule:
   - CLI returns estimate-only when chunk/char budget truncates unless `--confirm-estimate` is passed.
   - Tests cover first-run confirmation and budget-truncation confirmation.
 
-- [ ] 24. Harden systemd deployment persistence.
+- [x] 24. Harden systemd deployment persistence.
+
+  Status 2026-06-29: Completed for shipped deployment artifacts and operator docs. The packaged systemd unit is now a
+  persistent system service: it runs as `User=root`, installs under `multi-user.target`, invokes `/usr/bin/bash`
+  explicitly, sets a known `PATH`, pins Node through `TELEGRAM_NODE=/usr/bin/node`, and still performs the build
+  freshness preflight before daemon startup. The sync-daemon wrapper honors `TELEGRAM_NODE` so systemd does not depend
+  on ambient PATH to find Node. The runbook now documents exact install, `systemd-analyze verify`, restart, status,
+  logs, rollback, and removal commands. Live installation/restart and daemon-status proof remain tracked by P3.27.
+
+  Verification 2026-06-29:
+
+  - `systemd-analyze verify systemd/telegram-parilka-mcp-sync.service`
+  - `npm run check:shell`
+  - `TELEGRAM_NODE=/bin/true /usr/bin/bash bin/telegram-parilka-mcp-sync-daemon --unit-smoke`
+  - `npm run check`
+  - `npm run build`
+  - `npm test` (108/108)
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run status`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   The current user unit depends on root user-service behavior and ambient PATH for `/usr/bin/env bash` and `node`. Runbook does not make boot persistence self-contained.

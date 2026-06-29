@@ -71,26 +71,55 @@ cd /root/telegram-parilka-mcp
 npm run sync-once
 ```
 
-Install the user systemd service:
+Install the persistent system service:
 
 ```bash
 cd /root/telegram-parilka-mcp
 npm run build
 npm run smoke:mcp:wrapper
-mkdir -p /root/.config/systemd/user
-cp /root/telegram-parilka-mcp/systemd/telegram-parilka-mcp-sync.service /root/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now telegram-parilka-mcp-sync.service
+install -m 0644 /root/telegram-parilka-mcp/systemd/telegram-parilka-mcp-sync.service /etc/systemd/system/telegram-parilka-mcp-sync.service
+systemd-analyze verify /etc/systemd/system/telegram-parilka-mcp-sync.service
+systemctl daemon-reload
+systemctl enable --now telegram-parilka-mcp-sync.service
 ```
 
-Before restarting the service after code changes, run `npm run build`. The unit also runs a build freshness preflight
-and fails clearly if `dist/sync-daemon.js` is missing or stale.
+The unit runs as `User=root`, starts at boot through `multi-user.target`, calls `/usr/bin/bash` explicitly, sets a
+known `PATH`, and pins Node through `TELEGRAM_NODE=/usr/bin/node`. Before restarting after code changes, run
+`npm run build` and `npm run smoke:mcp:wrapper`. The unit also runs a build freshness preflight and fails clearly if
+`dist/sync-daemon.js` is missing or stale.
 
 Check it:
 
 ```bash
-systemctl --user status telegram-parilka-mcp-sync.service
-journalctl --user -u telegram-parilka-mcp-sync.service -n 100 --no-pager
+systemctl status telegram-parilka-mcp-sync.service
+systemctl show telegram-parilka-mcp-sync.service -p ActiveState -p SubState -p MainPID -p ExecMainStartTimestamp
+journalctl -u telegram-parilka-mcp-sync.service -n 100 --no-pager
+npm run status
+```
+
+Restart after a verified build:
+
+```bash
+cd /root/telegram-parilka-mcp
+npm run build
+npm run smoke:mcp:wrapper
+systemd-analyze verify /root/telegram-parilka-mcp/systemd/telegram-parilka-mcp-sync.service
+systemctl restart telegram-parilka-mcp-sync.service
+systemctl status telegram-parilka-mcp-sync.service
+```
+
+Rollback or remove the service:
+
+```bash
+cd /root/telegram-parilka-mcp
+git switch --detach <known-good-commit>
+npm run build
+npm run smoke:mcp:wrapper
+systemctl restart telegram-parilka-mcp-sync.service
+
+systemctl disable --now telegram-parilka-mcp-sync.service
+rm -f /etc/systemd/system/telegram-parilka-mcp-sync.service
+systemctl daemon-reload
 ```
 
 ## Health Status

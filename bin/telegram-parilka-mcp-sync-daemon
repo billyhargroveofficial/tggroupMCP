@@ -8,4 +8,5 @@ cd "$project_dir"
 entrypoint="$project_dir/dist/sync-daemon.js"
 "$project_dir/bin/telegram-parilka-mcp-check-build" "$project_dir" "$entrypoint"
 
-exec node "$entrypoint" "$@"
+node_bin="${TELEGRAM_NODE:-node}"
+exec "$node_bin" "$entrypoint" "$@"

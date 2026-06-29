@@ -7,12 +7,17 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
+User=root
+Group=root
 WorkingDirectory=/root/telegram-parilka-mcp
-ExecStartPre=/root/telegram-parilka-mcp/bin/telegram-parilka-mcp-check-build /root/telegram-parilka-mcp /root/telegram-parilka-mcp/dist/sync-daemon.js
-ExecStart=/root/telegram-parilka-mcp/bin/telegram-parilka-mcp-sync-daemon
+ExecStartPre=/usr/bin/bash /root/telegram-parilka-mcp/bin/telegram-parilka-mcp-check-build /root/telegram-parilka-mcp /root/telegram-parilka-mcp/dist/sync-daemon.js
+ExecStart=/usr/bin/bash /root/telegram-parilka-mcp/bin/telegram-parilka-mcp-sync-daemon
 Restart=on-failure
 RestartSec=30
 Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=TELEGRAM_PROJECT_DIR=/root/telegram-parilka-mcp
+Environment=TELEGRAM_NODE=/usr/bin/node
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
