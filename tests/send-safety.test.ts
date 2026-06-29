@@ -476,6 +476,60 @@ test("sent dedupe keys survive a fresh tools instance", async (t) => {
   assert.equal(secondTelegram.sends.length, 0);
 });
 
+test("sent dedupe keys are permanent audit ids before and after the old ttl window", () => {
+  const store = new MessageStore(":memory:");
+  const original = store.reserveSend({
+    outboxId: "send/permanent-dedupe",
+    dedupeKey: "dedupe/permanent",
+    payloadHash: "payload/hash",
+    chatId: "-1001",
+    userKey: "mcp-server",
+    nowMs: 1_000,
+    maxAgeMs: 120_000,
+    userCooldownMs: 0,
+    maxPendingPerUserPerChat: 10,
+    maxQueuePerChat: 10,
+  });
+
+  assert.equal(original.kind, "queued");
+  assert.equal(store.markSendSending(original.outboxId, 1_001), true);
+  assert.equal(store.markSendSent(original.outboxId, 9001, 1_002), true);
+
+  for (const nowMs of [5 * 60_000, 31 * 24 * 60 * 60_000]) {
+    const duplicate = store.reserveSend({
+      outboxId: `send/duplicate-${nowMs}`,
+      dedupeKey: "dedupe/permanent",
+      payloadHash: "payload/hash",
+      chatId: "-1001",
+      userKey: "mcp-server",
+      nowMs,
+      maxAgeMs: 120_000,
+      userCooldownMs: 0,
+      maxPendingPerUserPerChat: 10,
+      maxQueuePerChat: 10,
+    });
+    assert.equal(duplicate.kind, "duplicate_sent");
+    assert.equal(duplicate.telegramMessageId, 9001);
+  }
+
+  assert.throws(
+    () =>
+      store.reserveSend({
+        outboxId: "send/permanent-dedupe-conflict",
+        dedupeKey: "dedupe/permanent",
+        payloadHash: "payload/other",
+        chatId: "-1001",
+        userKey: "mcp-server",
+        nowMs: 31 * 24 * 60 * 60_000,
+        maxAgeMs: 120_000,
+        userCooldownMs: 0,
+        maxPendingPerUserPerChat: 10,
+        maxQueuePerChat: 10,
+      }),
+    /dedupe_key has already been used/,
+  );
+});
+
 test("failed sends can retry with the same dedupe key", async () => {
   const telegram = new FakeTelegram();
   telegram.failNextSend = new Error("temporary send failure");
@@ -802,7 +856,6 @@ function makeTools(
         searchLimit: 12,
       },
       throttle: {
-        dedupeTtlMs: 600_000,
         userCooldownMs: 0,
         maxPendingPerUserPerChat: 10,
         maxQueuePerChat: 25,

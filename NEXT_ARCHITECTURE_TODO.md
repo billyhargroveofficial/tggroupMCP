@@ -494,7 +494,25 @@ Important operating rule:
   - No outbox or cooldown row is created on invalid reply.
   - `reply_to_message` has tests for no approval, matching approval, mismatched message ID, consumed approval, expired approval, and admin bypass.
 
-- [ ] 13. Define and implement dedupe TTL semantics.
+- [x] 13. Define and implement dedupe TTL semantics.
+
+  Status 2026-06-29: Completed. Dedupe keys are now explicitly permanent audit/idempotency keys after a successful
+  live send, not TTL-scoped retry tokens. Reusing the same `dedupe_key` and payload after `sent` returns the recorded
+  Telegram message id indefinitely; using the same key with a different payload remains rejected. Failed and expired
+  sends can still be retried with the same key and payload. The misleading `TELEGRAM_DEDUPE_TTL_MS` /
+  `dedupeTtlMs` config surface was removed from runtime config and test fixtures, and docs now describe the permanent
+  sent-key semantics.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/send-safety.test.ts tests/config-validation.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run print-config`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   `TELEGRAM_DEDUPE_TTL_MS` is parsed and exposed, but sent dedupe keys are effectively permanent because `dedupe_key` is unique and duplicate-sent handling ignores TTL.

@@ -274,7 +274,6 @@ function config(): AppConfig {
       searchLimit: 12,
     },
     throttle: {
-      dedupeTtlMs: 600_000,
       userCooldownMs: 0,
       maxPendingPerUserPerChat: 10,
       maxQueuePerChat: 25,

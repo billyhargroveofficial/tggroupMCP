@@ -95,3 +95,7 @@ mode, link preview, and silent options. `TELEGRAM_DRY_RUN_DEFAULT=true` or `TELE
 send tool call into hard dry-run mode; callers cannot override that with `dry_run:false`, even when the approval bypass
 flag is set. Reply targets are validated before approvals are consumed or send outbox rows are reserved; previews and
 dry-runs include a short reply target excerpt when the target is available.
+
+Use `dedupe_key` as a permanent idempotency/audit key for actionable live sends. Once a send is recorded as `sent`,
+reusing the same key and payload returns the original Telegram message id instead of posting again; different payloads
+with the same key are rejected. Failed or expired sends can be retried with the same key and payload.

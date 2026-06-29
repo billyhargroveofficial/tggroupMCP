@@ -69,7 +69,6 @@ export const NUMERIC_ENV_RULES = {
   TELEGRAM_EMBEDDINGS_MAX_CHARS_PER_RUN: { fallback: 500_000, min: 1, max: 50_000_000 },
   TELEGRAM_EMBEDDINGS_VECTOR_CANDIDATE_LIMIT: { fallback: 20_000, min: 1, max: 1_000_000 },
   TELEGRAM_EMBEDDINGS_SEARCH_LIMIT: { fallback: 12, min: 1, max: 1_000 },
-  TELEGRAM_DEDUPE_TTL_MS: { fallback: 10 * 60_000, min: 1_000, max: 30 * 24 * 60 * 60_000 },
   TELEGRAM_USER_COOLDOWN_MS: { fallback: 20_000, min: 0, max: 24 * 60 * 60_000 },
   TELEGRAM_MAX_PENDING_PER_USER_PER_CHAT: { fallback: 1, min: 1, max: 1_000 },
   TELEGRAM_MAX_QUEUE_PER_CHAT: { fallback: 25, min: 1, max: 100_000 },
@@ -205,7 +204,6 @@ export type AppConfig = {
     searchLimit: number;
   };
   throttle: {
-    dedupeTtlMs: number;
     userCooldownMs: number;
     maxPendingPerUserPerChat: number;
     maxQueuePerChat: number;
@@ -291,7 +289,6 @@ export function loadConfig(): AppConfig {
       searchLimit: intFromEnv("TELEGRAM_EMBEDDINGS_SEARCH_LIMIT"),
     },
     throttle: {
-      dedupeTtlMs: intFromEnv("TELEGRAM_DEDUPE_TTL_MS"),
       userCooldownMs: intFromEnv("TELEGRAM_USER_COOLDOWN_MS"),
       maxPendingPerUserPerChat: intFromEnv("TELEGRAM_MAX_PENDING_PER_USER_PER_CHAT"),
       maxQueuePerChat: intFromEnv("TELEGRAM_MAX_QUEUE_PER_CHAT"),

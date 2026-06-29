@@ -735,7 +735,6 @@ function config(embeddings: Partial<AppConfig["embeddings"]> = {}): AppConfig {
       ...embeddings,
     },
     throttle: {
-      dedupeTtlMs: 600_000,
       userCooldownMs: 0,
       maxPendingPerUserPerChat: 10,
       maxQueuePerChat: 25,

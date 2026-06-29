@@ -21,6 +21,10 @@ Default chat: `-1003179772905` (`Парилка228`). All tools accept optional 
 - `send_message`: send or dry-run a message. Respects allowlist, hard dry-run config, live-send approval, reply-target preflight, dedupe, per-user cooldown, per-chat queue, and global concurrency.
 - `reply_to_message`: convenience wrapper for `send_message` with required `message_id`; live replies require a matching preview approval too. Reply targets are checked before approval consumption and outbox reservation.
 
+`dedupe_key` is a permanent audit/idempotency key after a successful live send. Reusing the same key and payload returns
+the recorded Telegram message id; reusing the key with different payload is rejected. Failed or expired sends may be
+retried with the same key and payload.
+
 ## Output Shape
 
 Tools return JSON in text content:
