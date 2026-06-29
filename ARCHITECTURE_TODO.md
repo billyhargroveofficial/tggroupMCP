@@ -220,6 +220,14 @@ Acceptance criteria:
 
 ### 7. Harden embeddings opt-in
 
+Status 2026-06-29: Completed. Embeddings remain disabled unless `TELEGRAM_EMBEDDINGS_ENABLED=true`; an `OPENAI_API_KEY` alone does not make `VectorRag` configured and the daemon returns `embeddings:null`. `index_embeddings` returns a clear disabled/configuration error when disabled. First-run indexing now produces a structured estimate with provider, base URL, model, dimensions, chat, limit, estimated chunks/messages/chars, existing chunks, and privacy text; non-empty first runs require `confirm_estimate:true` / `--confirm-estimate` before any external embedding API call. The sync daemon logs the first-run estimate and skips API calls until a manual confirmed index creates initial chunks.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+- `npm run print-config`
+
 Problem:
 The reviewers found that `OPENAI_API_KEY` implied embeddings were configured/enabled by default. The default has been changed so `TELEGRAM_EMBEDDINGS_ENABLED=true` is required, but the first indexing run still needs stronger privacy and cost visibility.
 

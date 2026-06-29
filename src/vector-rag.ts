@@ -15,6 +15,22 @@ export type EmbeddingIndexResult = {
   stats: Array<Record<string, unknown>>;
 };
 
+export type EmbeddingIndexEstimate = {
+  provider: string;
+  baseUrl: string;
+  model: string;
+  dimensions?: number;
+  chatId: string;
+  limitChunks: number;
+  estimatedChunks: number;
+  estimatedMessages: number;
+  estimatedChars: number;
+  existingChunks: number;
+  firstRun: boolean;
+  requiresConfirmation: boolean;
+  privacy: string;
+};
+
 export type VectorSearchHit = {
   rank: number;
   score: number;
@@ -59,10 +75,20 @@ export class VectorRag {
     limitChunks?: number;
     afterMessageId?: number;
     rebuild?: boolean;
+    confirmFirstRun?: boolean;
   }): Promise<EmbeddingIndexResult> {
     this.embeddings.assertConfigured();
+    const estimate = this.estimateIndexCachedMessages(params);
+    if (estimate.requiresConfirmation && !params.confirmFirstRun) {
+      throw new ToolError({
+        category: "permission",
+        retryable: false,
+        message:
+          "First embedding index requires explicit confirmation. Review the estimate and retry with confirm_estimate:true.",
+      });
+    }
 
-    const limitChunks = Math.max(1, params.limitChunks ?? this.config.embeddings.tickChunkLimit);
+    const limitChunks = estimate.limitChunks;
     const deletedChunks = params.rebuild
       ? this.store.deleteEmbeddingChunks({
           chatId: params.chatId,
@@ -102,6 +128,46 @@ export class VectorRag {
       nextAfterMessageId: afterMessageId,
       deletedChunks,
       stats: this.store.getEmbeddingStats(params.chatId),
+    };
+  }
+
+  estimateIndexCachedMessages(params: {
+    chatId: string;
+    limitChunks?: number;
+    afterMessageId?: number;
+    rebuild?: boolean;
+  }): EmbeddingIndexEstimate {
+    this.embeddings.assertConfigured();
+    const limitChunks = Math.max(1, params.limitChunks ?? this.config.embeddings.tickChunkLimit);
+    const stats = this.store.getEmbeddingStats(params.chatId);
+    const afterMessageId =
+      params.afterMessageId ??
+      (params.rebuild
+        ? undefined
+        : this.store.getEmbeddingCursor({
+            chatId: params.chatId,
+            model: this.config.embeddings.model,
+            dimensions: this.config.embeddings.dimensions,
+          }));
+    const inputs = this.buildChunks(params.chatId, afterMessageId, limitChunks);
+    const existingChunks = stats.reduce((sum, row) => sum + Number(row.chunks ?? 0), 0);
+    const estimatedChunks = inputs.length;
+    const firstRun = existingChunks === 0;
+
+    return {
+      provider: embeddingProvider(this.config.embeddings.baseUrl),
+      baseUrl: this.config.embeddings.baseUrl,
+      model: this.config.embeddings.model,
+      dimensions: this.config.embeddings.dimensions,
+      chatId: params.chatId,
+      limitChunks,
+      estimatedChunks,
+      estimatedMessages: inputs.reduce((sum, chunk) => sum + chunk.messageCount, 0),
+      estimatedChars: inputs.reduce((sum, chunk) => sum + chunk.text.length, 0),
+      existingChunks,
+      firstRun,
+      requiresConfirmation: firstRun && estimatedChunks > 0,
+      privacy: "Embedding indexing sends cached Telegram message text to the configured external embeddings provider.",
     };
   }
 
@@ -275,6 +341,15 @@ export function formatMessage(message: StoredMessage): string {
 
 function reciprocalRank(index: number): number {
   return 1 / (60 + index + 1);
+}
+
+function embeddingProvider(baseUrl: string): string {
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host.endsWith("openai.com") ? "OpenAI" : `OpenAI-compatible (${host})`;
+  } catch {
+    return "OpenAI-compatible";
+  }
 }
 
 export function assertVectorSearchReady(result: { available: boolean; error?: string }): void {

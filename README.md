@@ -43,13 +43,18 @@ not sit behind long locks.
 
 ## Vector RAG
 
-Embeddings are disabled unless explicitly opted in. Set `TELEGRAM_EMBEDDINGS_ENABLED=true` plus `OPENAI_API_KEY` or `TELEGRAM_EMBEDDINGS_API_KEY`, then index cached messages into local SQLite vector chunks:
+Embeddings are disabled unless explicitly opted in. Set `TELEGRAM_EMBEDDINGS_ENABLED=true` plus `OPENAI_API_KEY` or
+`TELEGRAM_EMBEDDINGS_API_KEY`, then review the first-run estimate before indexing cached messages into local SQLite
+vector chunks. Indexing sends cached Telegram message text to the configured external embeddings provider.
 
 ```bash
-npm run embed-once -- --limit-chunks 1000
+npm run embed-once -- --limit-chunks 1000 --estimate-only
+npm run embed-once -- --limit-chunks 1000 --confirm-estimate
 ```
 
-The regular sync daemon also indexes new chunks only when embeddings are explicitly enabled and configured. `search_messages` returns keyword, vector, and hybrid candidates; `semantic_search_messages` returns only cosine-ranked chunks.
+The regular sync daemon indexes new chunks only when embeddings are explicitly enabled and configured. On the first
+indexing run it logs the estimate and skips API calls until you run a confirmed manual index. `search_messages` returns
+keyword, vector, and hybrid candidates; `semantic_search_messages` returns only cosine-ranked chunks.
 
 MCP config example:
 

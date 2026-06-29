@@ -129,7 +129,7 @@ function stopOnPermanentDaemonErrors(errors: NormalizedError[]): void {
   throw new ToolError(permanent);
 }
 
-async function indexEmbeddings(
+export async function indexEmbeddings(
   vectorRag: VectorRag,
   chatId: string | undefined,
 ): Promise<Record<string, unknown> | null> {
@@ -137,7 +137,14 @@ async function indexEmbeddings(
     return null;
   }
   try {
-    const result = await vectorRag.indexCachedMessages({ chatId });
+    const estimate = vectorRag.estimateIndexCachedMessages({ chatId });
+    if (estimate.requiresConfirmation) {
+      return {
+        skipped: "first_embedding_index_requires_manual_confirmation",
+        estimate,
+      };
+    }
+    const result = await vectorRag.indexCachedMessages({ chatId, confirmFirstRun: true });
     return {
       chunksCreated: result.chunksCreated,
       messagesCovered: result.messagesCovered,

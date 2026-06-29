@@ -121,6 +121,8 @@ export class TelegramTools {
           limit_chunks: numberProp("Chunks to embed in this run.", 1, 5000),
           after_message_id: numberProp("Start indexing messages after this ID.", 0),
           rebuild: boolProp("Delete existing chunks for the configured model/dimensions before indexing."),
+          estimate_only: boolProp("Return privacy/cost estimate without calling the embedding API."),
+          confirm_estimate: boolProp("Confirm the first-run estimate and allow external embedding API calls."),
         }),
       },
       {
@@ -389,9 +391,25 @@ export class TelegramTools {
         limit_chunks: limitSchema.max(5000).default(this.config.embeddings.tickChunkLimit),
         after_message_id: z.number().int().nonnegative().optional(),
         rebuild: z.boolean().default(false),
+        estimate_only: z.boolean().default(false),
+        confirm_estimate: z.boolean().default(false),
       })
       .parse(rawArgs ?? {});
     const chat = this.cacheChat(args.chat);
+    const estimate = this.vectorRag.estimateIndexCachedMessages({
+      chatId: chat.chatId,
+      limitChunks: args.limit_chunks,
+      afterMessageId: args.after_message_id,
+      rebuild: args.rebuild,
+    });
+    if (args.estimate_only || (estimate.requiresConfirmation && !args.confirm_estimate)) {
+      return ok({
+        chat,
+        estimate,
+        requires_confirmation: estimate.requiresConfirmation && !args.confirm_estimate,
+        result: null,
+      });
+    }
     return ok({
       chat,
       result: await this.vectorRag.indexCachedMessages({
@@ -399,6 +417,7 @@ export class TelegramTools {
         limitChunks: args.limit_chunks,
         afterMessageId: args.after_message_id,
         rebuild: args.rebuild,
+        confirmFirstRun: args.confirm_estimate,
       }),
     });
   }

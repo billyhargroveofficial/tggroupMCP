@@ -10,12 +10,30 @@ async function main(): Promise<void> {
   const vectorRag = new VectorRag(config, store);
   const args = parseArgs(process.argv.slice(2));
   const chatId = args.chat || config.telegram.defaultChatId;
+  const estimate = vectorRag.estimateIndexCachedMessages({
+    chatId,
+    limitChunks: args.limitChunks ?? config.embeddings.tickChunkLimit,
+    afterMessageId: args.afterMessageId,
+    rebuild: args.rebuild,
+  });
+  if (args.estimateOnly || (estimate.requiresConfirmation && !args.confirmEstimate)) {
+    console.log(
+      stringify({
+        ok: true,
+        estimate,
+        requires_confirmation: estimate.requiresConfirmation && !args.confirmEstimate,
+        result: null,
+      }),
+    );
+    return;
+  }
 
   const result = await vectorRag.indexCachedMessages({
     chatId,
     limitChunks: args.limitChunks ?? config.embeddings.tickChunkLimit,
     afterMessageId: args.afterMessageId,
     rebuild: args.rebuild,
+    confirmFirstRun: args.confirmEstimate,
   });
   console.log(stringify({ ok: true, result }));
 }
@@ -25,12 +43,16 @@ function parseArgs(argv: string[]): {
   limitChunks?: number;
   afterMessageId?: number;
   rebuild?: boolean;
+  estimateOnly?: boolean;
+  confirmEstimate?: boolean;
 } {
   const result: {
     chat?: string;
     limitChunks?: number;
     afterMessageId?: number;
     rebuild?: boolean;
+    estimateOnly?: boolean;
+    confirmEstimate?: boolean;
   } = {};
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -42,6 +64,10 @@ function parseArgs(argv: string[]): {
       result.afterMessageId = Number(argv[++index]);
     } else if (arg === "--rebuild") {
       result.rebuild = true;
+    } else if (arg === "--estimate-only") {
+      result.estimateOnly = true;
+    } else if (arg === "--confirm-estimate") {
+      result.confirmEstimate = true;
     }
   }
   return result;
