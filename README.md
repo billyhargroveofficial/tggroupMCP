@@ -37,6 +37,10 @@ One-shot mode, useful for cron/systemd timers:
 npm run sync-once
 ```
 
+SQLite uses WAL plus a busy timeout and bounded retry for write coordination, so the MCP server, sync daemon, and
+embedding indexer can share the same DB. Keep any custom/manual write transactions small so reads and other writers do
+not sit behind long locks.
+
 ## Vector RAG
 
 Embeddings are disabled unless explicitly opted in. Set `TELEGRAM_EMBEDDINGS_ENABLED=true` plus `OPENAI_API_KEY` or `TELEGRAM_EMBEDDINGS_API_KEY`, then index cached messages into local SQLite vector chunks:

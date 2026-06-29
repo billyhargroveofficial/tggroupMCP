@@ -189,6 +189,13 @@ Acceptance criteria:
 
 ### 6. Add SQLite writer coordination
 
+Status 2026-06-29: Completed for current write paths. Each `MessageStore` connection sets `PRAGMA busy_timeout`, multi-row message and embedding writes use `BEGIN IMMEDIATE`, and store writes for chats, sync state, history jobs, send outbox transitions, and embedding deletion run through bounded `SQLITE_BUSY` retry with logged backoff. Concurrent writer tests hold a real SQLite write lock from a worker thread while another store writes messages, history jobs, and embedding chunks.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+
 Problem:
 The expected deployment can run MCP server, sync daemon, and embed indexer against the same SQLite DB. WAL is enabled, but there is no busy timeout, retry policy, or writer coordination. Batch writes use bare `BEGIN`.
 

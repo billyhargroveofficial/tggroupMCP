@@ -3,6 +3,10 @@ import type { EmbeddingChunkVector } from "./embeddings.js";
 import { ToolError } from "./errors.js";
 import type { ChatInfo } from "./telegram-client.js";
 
+const SQLITE_BUSY_TIMEOUT_MS = 250;
+const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
+const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
+
 export type StoredMessage = {
   id?: number;
   chatId: string;
@@ -85,12 +89,17 @@ export class MessageStore {
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
+    this.db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA synchronous = NORMAL;");
     this.migrate();
   }
 
   upsertChat(chat: ChatInfo): void {
+    this.writeWithRetry("upsertChat", () => this.upsertChatLocked(chat));
+  }
+
+  private upsertChatLocked(chat: ChatInfo): void {
     this.db
       .prepare(
         `INSERT INTO chats (chat_id, title, username, kind, is_forum, updated_at)
@@ -106,25 +115,24 @@ export class MessageStore {
   }
 
   upsertMessages(chat: ChatInfo, messages: StoredMessage[]): number {
-    this.upsertChat(chat);
-    const stmt = this.db.prepare(
-      `INSERT INTO messages (
-         chat_id, message_id, date, sender_id, sender_name, text,
-         reply_to_message_id, topic_id, raw_json, updated_at
-       )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-       ON CONFLICT(chat_id, message_id) DO UPDATE SET
-         date = excluded.date,
-         sender_id = excluded.sender_id,
-         sender_name = excluded.sender_name,
-         text = excluded.text,
-         reply_to_message_id = excluded.reply_to_message_id,
-         topic_id = excluded.topic_id,
-         raw_json = excluded.raw_json,
-         updated_at = excluded.updated_at`,
-    );
-    this.db.exec("BEGIN");
-    try {
+    return this.immediateTransaction("upsertMessages", () => {
+      this.upsertChatLocked(chat);
+      const stmt = this.db.prepare(
+        `INSERT INTO messages (
+           chat_id, message_id, date, sender_id, sender_name, text,
+           reply_to_message_id, topic_id, raw_json, updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(chat_id, message_id) DO UPDATE SET
+           date = excluded.date,
+           sender_id = excluded.sender_id,
+           sender_name = excluded.sender_name,
+           text = excluded.text,
+           reply_to_message_id = excluded.reply_to_message_id,
+           topic_id = excluded.topic_id,
+           raw_json = excluded.raw_json,
+           updated_at = excluded.updated_at`,
+      );
       for (const row of messages) {
         stmt.run(
           row.chatId,
@@ -138,12 +146,8 @@ export class MessageStore {
           row.rawJson ?? null,
         );
       }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return new Set(messages.map((message) => `${message.chatId}:${message.messageId}`)).size;
+      return new Set(messages.map((message) => `${message.chatId}:${message.messageId}`)).size;
+    });
   }
 
   getCachedChat(chatId: string): ChatInfo | undefined {
@@ -272,49 +276,51 @@ export class MessageStore {
       error?: string | null;
     },
   ): void {
-    this.upsertChat(chat);
-    this.db
-      .prepare(
-        `INSERT INTO sync_state (
-           chat_id, oldest_message_id, newest_message_id, next_backfill_offset_id,
-           synced_count, last_recent_sync_at, last_backfill_at, last_error, updated_at
-         )
-         VALUES (
-           ?, ?, ?, ?, ?,
-           CASE WHEN ? = 'recent' THEN datetime('now') ELSE NULL END,
-           CASE WHEN ? = 'backfill' THEN datetime('now') ELSE NULL END,
-           ?, datetime('now')
-         )
-         ON CONFLICT(chat_id) DO UPDATE SET
-           oldest_message_id = CASE
-             WHEN excluded.oldest_message_id IS NULL THEN sync_state.oldest_message_id
-             WHEN sync_state.oldest_message_id IS NULL THEN excluded.oldest_message_id
-             WHEN excluded.oldest_message_id < sync_state.oldest_message_id THEN excluded.oldest_message_id
-             ELSE sync_state.oldest_message_id
-           END,
-           newest_message_id = CASE
-             WHEN excluded.newest_message_id IS NULL THEN sync_state.newest_message_id
-             WHEN sync_state.newest_message_id IS NULL THEN excluded.newest_message_id
-             WHEN excluded.newest_message_id > sync_state.newest_message_id THEN excluded.newest_message_id
-             ELSE sync_state.newest_message_id
-           END,
-           next_backfill_offset_id = COALESCE(excluded.next_backfill_offset_id, sync_state.next_backfill_offset_id),
-           synced_count = excluded.synced_count,
-           last_recent_sync_at = COALESCE(excluded.last_recent_sync_at, sync_state.last_recent_sync_at),
-           last_backfill_at = COALESCE(excluded.last_backfill_at, sync_state.last_backfill_at),
-           last_error = excluded.last_error,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        chat.chatId,
-        state.oldestMessageId ?? null,
-        state.newestMessageId ?? null,
-        state.nextBackfillOffsetId ?? null,
-        state.syncedCount,
-        state.mode ?? "manual",
-        state.mode ?? "manual",
-        state.error ?? null,
-      );
+    this.immediateTransaction("updateSyncState", () => {
+      this.upsertChatLocked(chat);
+      this.db
+        .prepare(
+          `INSERT INTO sync_state (
+             chat_id, oldest_message_id, newest_message_id, next_backfill_offset_id,
+             synced_count, last_recent_sync_at, last_backfill_at, last_error, updated_at
+           )
+           VALUES (
+             ?, ?, ?, ?, ?,
+             CASE WHEN ? = 'recent' THEN datetime('now') ELSE NULL END,
+             CASE WHEN ? = 'backfill' THEN datetime('now') ELSE NULL END,
+             ?, datetime('now')
+           )
+           ON CONFLICT(chat_id) DO UPDATE SET
+             oldest_message_id = CASE
+               WHEN excluded.oldest_message_id IS NULL THEN sync_state.oldest_message_id
+               WHEN sync_state.oldest_message_id IS NULL THEN excluded.oldest_message_id
+               WHEN excluded.oldest_message_id < sync_state.oldest_message_id THEN excluded.oldest_message_id
+               ELSE sync_state.oldest_message_id
+             END,
+             newest_message_id = CASE
+               WHEN excluded.newest_message_id IS NULL THEN sync_state.newest_message_id
+               WHEN sync_state.newest_message_id IS NULL THEN excluded.newest_message_id
+               WHEN excluded.newest_message_id > sync_state.newest_message_id THEN excluded.newest_message_id
+               ELSE sync_state.newest_message_id
+             END,
+             next_backfill_offset_id = COALESCE(excluded.next_backfill_offset_id, sync_state.next_backfill_offset_id),
+             synced_count = excluded.synced_count,
+             last_recent_sync_at = COALESCE(excluded.last_recent_sync_at, sync_state.last_recent_sync_at),
+             last_backfill_at = COALESCE(excluded.last_backfill_at, sync_state.last_backfill_at),
+             last_error = excluded.last_error,
+             updated_at = excluded.updated_at`,
+        )
+        .run(
+          chat.chatId,
+          state.oldestMessageId ?? null,
+          state.newestMessageId ?? null,
+          state.nextBackfillOffsetId ?? null,
+          state.syncedCount,
+          state.mode ?? "manual",
+          state.mode ?? "manual",
+          state.error ?? null,
+        );
+    });
   }
 
   getSyncState(chatId: string): SyncState | undefined {
@@ -351,22 +357,21 @@ export class MessageStore {
     if (chunks.length === 0) {
       return 0;
     }
-    const stmt = this.db.prepare(
-      `INSERT INTO message_embedding_chunks (
-         chat_id, start_message_id, end_message_id, message_count, text,
-         embedding_model, embedding_dimensions, embedding, content_hash, updated_at
-       )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-       ON CONFLICT(chat_id, start_message_id, end_message_id, embedding_model, embedding_dimensions)
-       DO UPDATE SET
-         message_count = excluded.message_count,
-         text = excluded.text,
-         embedding = excluded.embedding,
-         content_hash = excluded.content_hash,
-         updated_at = excluded.updated_at`,
-    );
-    this.db.exec("BEGIN");
-    try {
+    return this.immediateTransaction("upsertEmbeddingChunks", () => {
+      const stmt = this.db.prepare(
+        `INSERT INTO message_embedding_chunks (
+           chat_id, start_message_id, end_message_id, message_count, text,
+           embedding_model, embedding_dimensions, embedding, content_hash, updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(chat_id, start_message_id, end_message_id, embedding_model, embedding_dimensions)
+         DO UPDATE SET
+           message_count = excluded.message_count,
+           text = excluded.text,
+           embedding = excluded.embedding,
+           content_hash = excluded.content_hash,
+           updated_at = excluded.updated_at`,
+      );
       for (const chunk of chunks) {
         stmt.run(
           chunk.chatId,
@@ -380,12 +385,8 @@ export class MessageStore {
           chunk.contentHash,
         );
       }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return chunks.length;
+      return chunks.length;
+    });
   }
 
   deleteEmbeddingChunks(params: { chatId: string; model?: string; dimensions?: number }): number {
@@ -399,8 +400,10 @@ export class MessageStore {
       clauses.push("embedding_dimensions = ?");
       values.push(params.dimensions);
     }
-    const result = this.db.prepare(`DELETE FROM message_embedding_chunks WHERE ${clauses.join(" AND ")}`).run(...toSqlValues(values));
-    return Number(result.changes ?? 0);
+    return this.writeWithRetry("deleteEmbeddingChunks", () => {
+      const result = this.db.prepare(`DELETE FROM message_embedding_chunks WHERE ${clauses.join(" AND ")}`).run(...toSqlValues(values));
+      return Number(result.changes ?? 0);
+    });
   }
 
   getEmbeddingChunks(params: {
@@ -467,8 +470,7 @@ export class MessageStore {
     maxQueuePerChat: number;
   }): SendReservation {
     const expiresAtMs = params.nowMs + params.maxAgeMs;
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.immediateTransaction("reserveSend", () => {
       this.expireStaleSendsLocked(params.nowMs);
       const existing = params.dedupeKey == null ? undefined : this.getSendByDedupeKeyLocked(params.dedupeKey);
       if (existing) {
@@ -480,7 +482,6 @@ export class MessageStore {
           });
         }
         if (existing.status === "sent") {
-          this.db.exec("COMMIT");
           return {
             kind: "duplicate_sent",
             outboxId: existing.id,
@@ -518,7 +519,6 @@ export class MessageStore {
             existing.id,
           );
         this.updateSendCooldownLocked(params.chatId, params.userKey, params.nowMs + params.userCooldownMs, params.nowMs);
-        this.db.exec("COMMIT");
         return { kind: "queued", outboxId: existing.id, expiresAtMs };
       }
 
@@ -543,52 +543,56 @@ export class MessageStore {
           expiresAtMs,
         );
       this.updateSendCooldownLocked(params.chatId, params.userKey, params.nowMs + params.userCooldownMs, params.nowMs);
-      this.db.exec("COMMIT");
       return { kind: "queued", outboxId: params.outboxId, expiresAtMs };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   markSendSending(outboxId: string, nowMs = Date.now()): void {
-    this.db
-      .prepare(
-        `UPDATE send_outbox
-         SET status = 'sending', sending_at_ms = ?, updated_at_ms = ?
-         WHERE id = ? AND status = 'queued'`,
-      )
-      .run(nowMs, nowMs, outboxId);
+    this.writeWithRetry("markSendSending", () => {
+      this.db
+        .prepare(
+          `UPDATE send_outbox
+           SET status = 'sending', sending_at_ms = ?, updated_at_ms = ?
+           WHERE id = ? AND status = 'queued'`,
+        )
+        .run(nowMs, nowMs, outboxId);
+    });
   }
 
   markSendSent(outboxId: string, telegramMessageId: number | undefined, nowMs = Date.now()): void {
-    this.db
-      .prepare(
-        `UPDATE send_outbox
-         SET status = 'sent', telegram_message_id = ?, sent_at_ms = ?, updated_at_ms = ?, error = NULL
-         WHERE id = ?`,
-      )
-      .run(telegramMessageId ?? null, nowMs, nowMs, outboxId);
+    this.writeWithRetry("markSendSent", () => {
+      this.db
+        .prepare(
+          `UPDATE send_outbox
+           SET status = 'sent', telegram_message_id = ?, sent_at_ms = ?, updated_at_ms = ?, error = NULL
+           WHERE id = ?`,
+        )
+        .run(telegramMessageId ?? null, nowMs, nowMs, outboxId);
+    });
   }
 
   markSendFailed(outboxId: string, error: string, nowMs = Date.now()): void {
-    this.db
-      .prepare(
-        `UPDATE send_outbox
-         SET status = 'failed', error = ?, updated_at_ms = ?
-         WHERE id = ?`,
-      )
-      .run(error, nowMs, outboxId);
+    this.writeWithRetry("markSendFailed", () => {
+      this.db
+        .prepare(
+          `UPDATE send_outbox
+           SET status = 'failed', error = ?, updated_at_ms = ?
+           WHERE id = ?`,
+        )
+        .run(error, nowMs, outboxId);
+    });
   }
 
   markSendExpired(outboxId: string, error = "Queued send expired before execution.", nowMs = Date.now()): void {
-    this.db
-      .prepare(
-        `UPDATE send_outbox
-         SET status = 'expired', error = ?, updated_at_ms = ?
-         WHERE id = ?`,
-      )
-      .run(error, nowMs, outboxId);
+    this.writeWithRetry("markSendExpired", () => {
+      this.db
+        .prepare(
+          `UPDATE send_outbox
+           SET status = 'expired', error = ?, updated_at_ms = ?
+           WHERE id = ?`,
+        )
+        .run(error, nowMs, outboxId);
+    });
   }
 
   getSendOutboxByDedupeKey(dedupeKey: string): StoredSendOutboxItem | undefined {
@@ -597,12 +601,14 @@ export class MessageStore {
 
   startHistoryJob(chatId: string, direction: "recent" | "backfill" | "manual", targetCount: number): string {
     const jobId = `hist_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    this.db
-      .prepare(
-        `INSERT INTO history_jobs (job_id, chat_id, direction, status, target_count, started_at)
-         VALUES (?, ?, ?, 'running', ?, datetime('now'))`,
-      )
-      .run(jobId, chatId, direction, targetCount);
+    this.writeWithRetry("startHistoryJob", () => {
+      this.db
+        .prepare(
+          `INSERT INTO history_jobs (job_id, chat_id, direction, status, target_count, started_at)
+           VALUES (?, ?, ?, 'running', ?, datetime('now'))`,
+        )
+        .run(jobId, chatId, direction, targetCount);
+    });
     return jobId;
   }
 
@@ -610,14 +616,16 @@ export class MessageStore {
     jobId: string,
     result: { status: "done" | "failed"; batches: number; messagesSeen: number; messagesUpserted: number; error?: string },
   ): void {
-    this.db
-      .prepare(
-        `UPDATE history_jobs
-         SET status = ?, finished_at = datetime('now'), batches = ?, messages_seen = ?,
-             messages_upserted = ?, error = ?
-         WHERE job_id = ?`,
-      )
-      .run(result.status, result.batches, result.messagesSeen, result.messagesUpserted, result.error ?? null, jobId);
+    this.writeWithRetry("finishHistoryJob", () => {
+      this.db
+        .prepare(
+          `UPDATE history_jobs
+           SET status = ?, finished_at = datetime('now'), batches = ?, messages_seen = ?,
+               messages_upserted = ?, error = ?
+           WHERE job_id = ?`,
+        )
+        .run(result.status, result.batches, result.messagesSeen, result.messagesUpserted, result.error ?? null, jobId);
+    });
   }
 
   getStats(chatId: string): Record<string, unknown> {
@@ -723,6 +731,52 @@ export class MessageStore {
       | Record<string, unknown>
       | undefined;
     return row == null ? undefined : rowToSendOutboxItem(row);
+  }
+
+  private immediateTransaction<T>(operation: string, fn: () => T): T {
+    return this.writeWithRetry(operation, () => {
+      let started = false;
+      try {
+        this.db.exec("BEGIN IMMEDIATE");
+        started = true;
+        const result = fn();
+        this.db.exec("COMMIT");
+        started = false;
+        return result;
+      } catch (error) {
+        if (started) {
+          try {
+            this.db.exec("ROLLBACK");
+          } catch (rollbackError) {
+            console.error(
+              `sqlite rollback failed after ${operation}: ${
+                rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+              }`,
+            );
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  private writeWithRetry<T>(operation: string, fn: () => T): T {
+    let delayMs = SQLITE_BUSY_RETRY_INITIAL_MS;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return fn();
+      } catch (error) {
+        if (!isSqliteBusy(error) || attempt >= SQLITE_BUSY_RETRY_ATTEMPTS) {
+          throw error;
+        }
+        const nextAttempt = attempt + 1;
+        console.error(
+          `sqlite busy during ${operation}; retry ${nextAttempt}/${SQLITE_BUSY_RETRY_ATTEMPTS} in ${delayMs}ms`,
+        );
+        sleepSync(delayMs);
+        delayMs *= 2;
+      }
+    }
   }
 
   private migrate(): void {
@@ -989,4 +1043,16 @@ function escapeFtsQuery(query: string): string {
 
 function toSqlValues(values: unknown[]): SQLInputValue[] {
   return values as SQLInputValue[];
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  const anyError = error as { code?: string; message?: string };
+  const message = String(anyError?.message ?? error ?? "").toUpperCase();
+  return anyError?.code === "SQLITE_BUSY" || message.includes("SQLITE_BUSY") || message.includes("DATABASE IS LOCKED");
+}
+
+function sleepSync(ms: number): void {
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, ms);
 }
