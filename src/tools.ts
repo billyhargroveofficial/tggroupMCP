@@ -22,7 +22,7 @@ const limitSchema = z.number().int().positive();
 const SERVER_SEND_USER_KEY = "mcp-server";
 const REPLY_TARGET_EXCERPT_CHARS = 240;
 
-type ToolContent = { content: Array<{ type: "text"; text: string }> };
+type ToolContent = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 type ReplyTargetMetadata = {
   message_id: number;
   source: "cache" | "live";
@@ -34,7 +34,12 @@ type ReplyTargetMetadata = {
 
 const jsonTool = (payload: unknown): ToolContent => ({
   content: [{ type: "text" as const, text: stringify(payload) }],
+  ...(isFailedToolPayload(payload) ? { isError: true } : {}),
 });
+
+function isFailedToolPayload(payload: unknown): payload is { ok: false } {
+  return payload != null && typeof payload === "object" && "ok" in payload && payload.ok === false;
+}
 
 export class TelegramTools {
   private readonly throttler: SendThrottler;
@@ -201,7 +206,7 @@ export class TelegramTools {
     ];
   }
 
-  async callTool(name: string, rawArgs: unknown): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  async callTool(name: string, rawArgs: unknown): Promise<ToolContent> {
     try {
       switch (name) {
         case "get_config":

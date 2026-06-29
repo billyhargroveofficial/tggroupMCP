@@ -46,6 +46,24 @@ test("invalid tool arguments return validation fields", async () => {
   assert.equal(error.fields?.[0]?.path, "limit");
 });
 
+test("failed tool results set MCP isError while preserving JSON payload", async () => {
+  const tools = makeTools();
+  const failure = await tools.callTool("read_history", {
+    limit: "bad",
+  });
+  const failurePayload = parseToolPayload(failure);
+
+  assert.equal(failure.isError, true);
+  assert.equal(failurePayload.ok, false);
+  assert.equal((failurePayload.error as { category: string }).category, "validation");
+
+  const success = await tools.callTool("get_config", {});
+  const successPayload = parseToolPayload(success);
+
+  assert.equal(success.isError, undefined);
+  assert.equal(successPayload.ok, true);
+});
+
 test("unknown tool arguments return validation field paths", async () => {
   const cases: Array<{ tool: string; args: Record<string, unknown>; path: string }> = [
     { tool: "get_config", args: { extra: true }, path: "extra" },
@@ -286,5 +304,9 @@ function config(): AppConfig {
 
 async function callTool(tools: TelegramTools, name: string, args: unknown): Promise<Record<string, unknown> & { ok: boolean }> {
   const result = await tools.callTool(name, args);
+  return parseToolPayload(result);
+}
+
+function parseToolPayload(result: { content: Array<{ type: "text"; text: string }> }): Record<string, unknown> & { ok: boolean } {
   return JSON.parse(result.content[0]!.text) as Record<string, unknown> & { ok: boolean };
 }

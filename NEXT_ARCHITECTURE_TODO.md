@@ -573,7 +573,22 @@ Important operating rule:
   - After tombstoning an Alice message, searches for old text and `Alice` return zero results.
   - FTS behavior is covered for insert, update, delete/tombstone, and migration rebuild.
 
-- [ ] 15. Use MCP-level error signaling or document JSON-only errors.
+- [x] 15. Use MCP-level error signaling or document JSON-only errors.
+
+  Status 2026-06-29: Completed. Failed tool payloads still preserve the normalized JSON body `{ ok:false, error }`,
+  but tool results now also set MCP `isError:true` whenever the JSON payload is a failure. Successful results leave
+  `isError` unset. Tests assert validation failures carry both MCP-level and JSON-level failure signals, and tool docs
+  now instruct clients to treat either `isError:true` or `ok:false` as failure.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/tools-response.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   Tool failures are returned as JSON `{ ok:false }` inside a successful MCP tool result. Clients that rely on MCP `isError` may treat validation/auth/rate-limit failures as successful unless they parse the JSON body.

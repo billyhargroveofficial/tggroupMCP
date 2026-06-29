@@ -47,6 +47,9 @@ or normalized errors:
 }
 ```
 
+Failed tool results also set MCP `isError:true` while preserving the JSON payload above. Clients should treat either
+MCP `isError:true` or JSON `ok:false` as failure.
+
 Runtime argument validation is strict. Unknown input keys are not ignored; they return `ok:false` with
 `error.category:"validation"` and a `fields[].path` entry naming the unknown key.
 
