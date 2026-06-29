@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
-import type { AppConfig } from "./config.js";
+import { redactUrlCredentials, type AppConfig } from "./config.js";
 import { fail, ok, ToolError } from "./errors.js";
 import { stringify } from "./json.js";
 import { gramMessageToStored, MessageStore, type ChatCacheStatus, type StoredMessage, type SyncState } from "./store.js";
@@ -258,7 +258,7 @@ export class TelegramTools {
       embeddings: {
         enabled: this.config.embeddings.enabled,
         configured: Boolean(this.config.embeddings.apiKey),
-        baseUrl: this.config.embeddings.baseUrl,
+        baseUrl: redactUrlCredentials(this.config.embeddings.baseUrl),
         model: this.config.embeddings.model,
         dimensions: this.config.embeddings.dimensions,
         requestTimeoutMs: this.config.embeddings.requestTimeoutMs,

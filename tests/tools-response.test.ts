@@ -65,6 +65,16 @@ test("failed tool results set MCP isError while preserving JSON payload", async 
   assert.equal(successPayload.ok, true);
 });
 
+test("get_config redacts credentials in embeddings base URL", async () => {
+  const appConfig = configuredEmbeddingsConfig({
+    baseUrl: "https://user:pass@example.test/v1?api_key=x&foo=bar&token=y&KEY=z",
+  });
+  const result = await callTool(makeTools(new MessageStore(":memory:"), appConfig), "get_config", {});
+  const config = result.config as { embeddings: { baseUrl: string } };
+
+  assert.equal(config.embeddings.baseUrl, "https://example.test/v1?api_key=redacted&foo=bar&token=redacted&KEY=redacted");
+});
+
 test("unknown tool arguments return validation field paths", async () => {
   const cases: Array<{ tool: string; args: Record<string, unknown>; path: string }> = [
     { tool: "get_config", args: { extra: true }, path: "extra" },

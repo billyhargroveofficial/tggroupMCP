@@ -773,7 +773,23 @@ Important operating rule:
   - Tests prove session generation and runtime config resolve API ID/hash/phone/session env values consistently.
   - Invalid API ID fails clearly.
 
-- [ ] 20. Redact credentials in embedding base URLs.
+- [x] 20. Redact credentials in embedding base URLs.
+
+  Status 2026-06-29: Completed. A shared `redactUrlCredentials()` sanitizer now strips URL username/password and
+  redacts case-insensitive token-like query params (`api_key`, `key`, `token`, `access_token`, `authorization`) while
+  preserving host/path and non-secret params. Both CLI `redactedConfig()` / `--print-config` and MCP `get_config` use
+  the same sanitizer for `embeddings.baseUrl`.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/config-validation.test.ts tests/tools-response.test.ts --test-reporter=spec`
+  - `env TELEGRAM_EMBEDDINGS_BASE_URL='https://user:pass@example.test/v1?api_key=x&foo=bar&Authorization=Bearer%20secret' npm run print-config`
+  - `npm run check`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper` (first parallel run raced with `npm run build` and failed stale-entrypoint preflight as expected; rerun after build passed)
 
   Problem:
   Redacted config returns `TELEGRAM_EMBEDDINGS_BASE_URL` as-is. If it contains username/password or token query params, `--print-config` and `get_config` can leak credentials.

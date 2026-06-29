@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { BOOLEAN_ENV_RULES, loadConfig, NUMERIC_ENV_RULES } from "../src/config.js";
+import { BOOLEAN_ENV_RULES, loadConfig, NUMERIC_ENV_RULES, redactedConfig } from "../src/config.js";
 
 test("every numeric env field rejects values below its allowed range", () => {
   for (const [name, rule] of Object.entries(NUMERIC_ENV_RULES)) {
@@ -299,6 +299,22 @@ test("copied env example keeps live sends hard-disabled", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("redacted config hides credentials in embeddings base URL", () => {
+  withEnv(
+    {
+      TELEGRAM_EMBEDDINGS_BASE_URL:
+        "https://user:pass@example.test/v1?api_key=x&foo=bar&Authorization=Bearer%20secret",
+    },
+    () => {
+      const config = redactedConfig(loadConfig()) as { embeddings: { baseUrl: string } };
+      assert.equal(
+        config.embeddings.baseUrl,
+        "https://example.test/v1?api_key=redacted&foo=bar&Authorization=redacted",
+      );
+    },
+  );
 });
 
 function unsetBooleanEnv(): Record<string, undefined> {

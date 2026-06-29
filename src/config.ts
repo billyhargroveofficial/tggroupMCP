@@ -117,6 +117,7 @@ function validateInteger(name: string, value: number, rule: NumericEnvRule): voi
 
 const TRUE_BOOL_VALUES = new Set(["1", "true", "yes", "on"]);
 const FALSE_BOOL_VALUES = new Set(["0", "false", "no", "off"]);
+const SECRET_URL_QUERY_PARAMS = new Set(["api_key", "key", "token", "access_token", "authorization"]);
 
 const boolFromEnv = (name: BooleanEnvName): boolean => {
   const rule = BOOLEAN_ENV_RULES[name];
@@ -348,7 +349,7 @@ export function redactedConfig(config: AppConfig): Record<string, unknown> {
     embeddings: {
       enabled: config.embeddings.enabled,
       configured: Boolean(config.embeddings.apiKey),
-      baseUrl: config.embeddings.baseUrl,
+      baseUrl: redactUrlCredentials(config.embeddings.baseUrl),
       model: config.embeddings.model,
       dimensions: config.embeddings.dimensions,
       apiBatchSize: config.embeddings.apiBatchSize,
@@ -366,4 +367,20 @@ export function redactedConfig(config: AppConfig): Record<string, unknown> {
     },
     throttle: config.throttle,
   };
+}
+
+export function redactUrlCredentials(raw: string): string {
+  try {
+    const url = new URL(raw.trim());
+    url.username = "";
+    url.password = "";
+    const query = new URLSearchParams();
+    for (const [key, value] of url.searchParams) {
+      query.append(key, SECRET_URL_QUERY_PARAMS.has(key.toLowerCase()) ? "redacted" : value);
+    }
+    url.search = query.toString();
+    return url.toString();
+  } catch {
+    return raw;
+  }
 }
