@@ -42,6 +42,7 @@ export type VectorSearchHit = {
     startMessageId: number;
     endMessageId: number;
     messageCount: number;
+    messageIds: number[];
     text: string;
     model: string;
     dimensions: number;
@@ -118,14 +119,11 @@ export class VectorRag {
     }
     const dirtyChunksDeleted = params.rebuild
       ? undefined
-      : this.store.deleteDirtyEmbeddingChunksForRanges({
+      : this.store.deleteDirtyEmbeddingChunksForMessages({
           chatId: params.chatId,
           model: this.config.embeddings.model,
           dimensions: this.config.embeddings.dimensions,
-          ranges: inputs.map((chunk) => ({
-            startMessageId: chunk.startMessageId,
-            endMessageId: chunk.endMessageId,
-          })),
+          messageIds: inputs.flatMap((chunk) => chunk.messageIds),
         });
 
     return {
@@ -274,7 +272,6 @@ export class VectorRag {
     let cursor = params.afterMessageId;
     let buffer: StoredMessage[] = [];
     let bufferChars = 0;
-    let previousMessageId: number | undefined;
     const fetchLimit = Math.max(this.config.embeddings.chunkMessages * params.limitChunks * 2, 500);
 
     const flush = (): void => {
@@ -287,6 +284,7 @@ export class VectorRag {
         chatId,
         startMessageId: first.messageId,
         endMessageId: last.messageId,
+        messageIds: buffer.map((message) => message.messageId),
         messageCount: buffer.length,
         text: buffer.map(formatMessage).join("\n"),
       });
@@ -314,10 +312,6 @@ export class VectorRag {
 
       for (const message of messages) {
         cursor = message.messageId;
-        if (previousMessageId != null && message.messageId !== previousMessageId + 1) {
-          flush();
-        }
-        previousMessageId = message.messageId;
         const formatted = formatMessage(message);
         if (buffer.length > 0 && bufferChars + formatted.length > this.config.embeddings.chunkMaxChars) {
           flush();
@@ -348,17 +342,16 @@ export class VectorRag {
         id: chunk.id,
         startMessageId: chunk.startMessageId,
         endMessageId: chunk.endMessageId,
+        messageIds: chunk.messageIds,
         messageCount: chunk.messageCount,
         text: chunk.text,
         model: chunk.model,
         dimensions: chunk.dimensions,
       },
       messages: includeMessages
-        ? this.store.getMessagesInRange({
+        ? this.store.getMessagesByIds({
             chatId: chunk.chatId,
-            startMessageId: chunk.startMessageId,
-            endMessageId: chunk.endMessageId,
-            limit: Math.max(chunk.messageCount, 1),
+            messageIds: chunk.messageIds,
           })
         : [],
     };

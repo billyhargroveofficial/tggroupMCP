@@ -503,6 +503,13 @@ Acceptance criteria:
 
 ### 16. Store exact chunk membership
 
+Status 2026-06-29: Completed. Schema version 6 adds `message_embedding_chunk_messages` with ordered chunk membership rows, indexes for chunk/message lookups, and a delete trigger so memberships are removed when chunks are deleted. New vector chunks store the exact `messageIds` used to create the embedding; migrated historical chunks are backfilled best-effort from non-empty cached messages inside the old range. Coverage scans and dirty marking now use exact membership rows instead of broad chunk ranges, dirty cleanup only removes chunks whose member messages were actually reindexed, and vector hit hydration uses `getMessagesByIds()` in membership order instead of `getMessagesInRange(... LIMIT messageCount)`.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec` (49 passed)
+- `npm run check`
+
 Problem:
 Chunk input skips empty text rows, but vector hit hydration fetches all messages in the start/end range with `LIMIT messageCount`. This can return the wrong source messages.
 

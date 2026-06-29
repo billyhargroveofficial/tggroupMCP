@@ -118,6 +118,37 @@ test("dirty chunks are excluded from search and reindexed after message edits", 
   assert.match(search.hits[0]?.chunk.text ?? "", /edited needle/);
 });
 
+test("vector hits hydrate exact chunk message ids across empty messages", async (t) => {
+  mockEmbeddingFetch(t);
+  const store = new MessageStore(":memory:");
+  const vectorRag = new VectorRag(config(), store);
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 1, senderName: "alice", text: "plain alpha" },
+    { chatId: CHAT.chatId, messageId: 2, senderName: "media", text: "" },
+    { chatId: CHAT.chatId, messageId: 3, senderName: "bob", text: "needle beta" },
+  ]);
+
+  await vectorRag.indexCachedMessages({
+    chatId: CHAT.chatId,
+    limitChunks: 1,
+    confirmFirstRun: true,
+  });
+  const [chunk] = store.getEmbeddingChunks({
+    chatId: CHAT.chatId,
+    model: config().embeddings.model,
+    dimensions: config().embeddings.dimensions,
+  });
+  assert.deepEqual(chunk?.messageIds, [1, 3]);
+  assert.equal(chunk?.startMessageId, 1);
+  assert.equal(chunk?.endMessageId, 3);
+
+  const search = await vectorRag.search({ chatId: CHAT.chatId, query: "needle", limit: 1, includeMessages: true });
+  assert.deepEqual(
+    search.hits[0]?.messages.map((message) => message.messageId),
+    [1, 3],
+  );
+});
+
 function mockEmbeddingFetch(t: { after(fn: () => void): void }): void {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_url, init) => {

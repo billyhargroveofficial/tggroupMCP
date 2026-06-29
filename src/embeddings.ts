@@ -6,6 +6,7 @@ export type EmbeddingChunkInput = {
   chatId: string;
   startMessageId: number;
   endMessageId: number;
+  messageIds: number[];
   messageCount: number;
   text: string;
 };

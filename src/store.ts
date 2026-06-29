@@ -6,7 +6,7 @@ import type { ChatInfo } from "./telegram-client.js";
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
 const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 export type StoredMessage = {
   id?: number;
@@ -55,6 +55,7 @@ export type StoredEmbeddingChunk = {
   chatId: string;
   startMessageId: number;
   endMessageId: number;
+  messageIds: number[];
   messageCount: number;
   text: string;
   model: string;
@@ -356,13 +357,13 @@ export class MessageStore {
       "m.deleted_at IS NULL",
       `NOT EXISTS (
         SELECT 1
-        FROM message_embedding_chunks c
-        WHERE c.chat_id = m.chat_id
+        FROM message_embedding_chunk_messages cm
+        JOIN message_embedding_chunks c ON c.id = cm.chunk_id
+        WHERE cm.chat_id = m.chat_id
+          AND cm.message_id = m.message_id
           AND c.embedding_model = ?
           AND (? IS NULL OR c.embedding_dimensions = ?)
           AND c.dirty_at IS NULL
-          AND c.start_message_id <= m.message_id
-          AND c.end_message_id >= m.message_id
       )`,
     ];
     const values: unknown[] = [params.chatId, params.model, params.dimensions ?? null, params.dimensions ?? null];
@@ -394,6 +395,19 @@ export class MessageStore {
       )
       .all(params.chatId, params.startMessageId, params.endMessageId, limit) as Record<string, unknown>[];
     return rows.map(rowToStoredMessage);
+  }
+
+  getMessagesByIds(params: { chatId: string; messageIds: number[] }): StoredMessage[] {
+    if (params.messageIds.length === 0) {
+      return [];
+    }
+    const uniqueIds = [...new Set(params.messageIds)];
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT * FROM messages WHERE chat_id = ? AND message_id IN (${placeholders})`)
+      .all(params.chatId, ...uniqueIds) as Record<string, unknown>[];
+    const byId = new Map(rows.map((row) => [Number(row.message_id), rowToStoredMessage(row)]));
+    return params.messageIds.map((id) => byId.get(id)).filter((message): message is StoredMessage => message != null);
   }
 
   updateSyncState(
@@ -533,6 +547,27 @@ export class MessageStore {
           chunk.embedding,
           chunk.contentHash,
         );
+        const row = this.db
+          .prepare(
+            `SELECT id
+             FROM message_embedding_chunks
+             WHERE chat_id = ?
+               AND start_message_id = ?
+               AND end_message_id = ?
+               AND embedding_model = ?
+               AND embedding_dimensions = ?`,
+          )
+          .get(chunk.chatId, chunk.startMessageId, chunk.endMessageId, chunk.model, chunk.dimensions) as
+          | Record<string, unknown>
+          | undefined;
+        if (!row) {
+          throw new Error("Failed to read embedding chunk id after upsert.");
+        }
+        this.replaceEmbeddingChunkMessagesLocked(
+          Number(row.id),
+          chunk.chatId,
+          normalizeChunkMessageIds(chunk.messageIds, chunk.startMessageId, chunk.endMessageId),
+        );
       }
       return chunks.length;
     });
@@ -602,6 +637,44 @@ export class MessageStore {
     });
   }
 
+  deleteDirtyEmbeddingChunksForMessages(params: {
+    chatId: string;
+    model: string;
+    dimensions?: number;
+    messageIds: number[];
+  }): number {
+    const messageIds = [...new Set(params.messageIds)];
+    if (messageIds.length === 0) {
+      return 0;
+    }
+    return this.immediateTransaction("deleteDirtyEmbeddingChunksForMessages", () => {
+      let deleted = 0;
+      const clauses = [
+        "chat_id = ?",
+        "embedding_model = ?",
+        "dirty_at IS NOT NULL",
+        `id IN (
+          SELECT chunk_id
+          FROM message_embedding_chunk_messages
+          WHERE chat_id = ? AND message_id = ?
+        )`,
+      ];
+      if (params.dimensions != null) {
+        clauses.push("embedding_dimensions = ?");
+      }
+      const stmt = this.db.prepare(`DELETE FROM message_embedding_chunks WHERE ${clauses.join(" AND ")}`);
+      for (const messageId of messageIds) {
+        const values: unknown[] = [params.chatId, params.model, params.chatId, messageId];
+        if (params.dimensions != null) {
+          values.push(params.dimensions);
+        }
+        const result = stmt.run(...toSqlValues(values));
+        deleted += Number(result.changes ?? 0);
+      }
+      return deleted;
+    });
+  }
+
   getEmbeddingChunks(params: {
     chatId: string;
     model: string;
@@ -634,7 +707,10 @@ export class MessageStore {
          ORDER BY start_message_id ASC`,
       )
       .all(...toSqlValues(values)) as Record<string, unknown>[];
-    return rows.map(rowToEmbeddingChunk);
+    return rows.map((row) => {
+      const chunk = rowToEmbeddingChunk(row);
+      return { ...chunk, messageIds: this.getEmbeddingChunkMessageIdsLocked(chunk.id) };
+    });
   }
 
   getEmbeddingStats(chatId: string): Array<Record<string, unknown>> {
@@ -683,13 +759,13 @@ export class MessageStore {
            AND m.deleted_at IS NULL
            AND EXISTS (
              SELECT 1
-             FROM message_embedding_chunks c
-             WHERE c.chat_id = m.chat_id
+             FROM message_embedding_chunk_messages cm
+             JOIN message_embedding_chunks c ON c.id = cm.chunk_id
+             WHERE cm.chat_id = m.chat_id
+               AND cm.message_id = m.message_id
                AND c.embedding_model = ?
                AND (? IS NULL OR c.embedding_dimensions = ?)
                AND c.dirty_at IS NULL
-               AND c.start_message_id <= m.message_id
-               AND c.end_message_id >= m.message_id
            )`,
       )
       .get(...values) as Record<string, unknown> | undefined;
@@ -702,13 +778,13 @@ export class MessageStore {
            AND m.deleted_at IS NULL
            AND NOT EXISTS (
              SELECT 1
-             FROM message_embedding_chunks c
-             WHERE c.chat_id = m.chat_id
+             FROM message_embedding_chunk_messages cm
+             JOIN message_embedding_chunks c ON c.id = cm.chunk_id
+             WHERE cm.chat_id = m.chat_id
+               AND cm.message_id = m.message_id
                AND c.embedding_model = ?
                AND (? IS NULL OR c.embedding_dimensions = ?)
                AND c.dirty_at IS NULL
-               AND c.start_message_id <= m.message_id
-               AND c.end_message_id >= m.message_id
            )
          ORDER BY m.message_id ASC`,
       )
@@ -1133,6 +1209,10 @@ export class MessageStore {
         this.applyDaemonStatusMigration();
         this.db.exec("PRAGMA user_version = 5");
       }
+      if (currentVersion < 6) {
+        this.applyEmbeddingChunkMembershipMigration();
+        this.db.exec("PRAGMA user_version = 6");
+      }
       this.validateSchema();
     });
   }
@@ -1249,6 +1329,14 @@ export class MessageStore {
         UNIQUE(chat_id, start_message_id, end_message_id, embedding_model, embedding_dimensions)
       );
 
+      CREATE TABLE IF NOT EXISTS message_embedding_chunk_messages (
+        chunk_id INTEGER NOT NULL,
+        chat_id TEXT NOT NULL,
+        message_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        PRIMARY KEY(chunk_id, message_id)
+      );
+
       CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
         text,
         sender_name,
@@ -1273,12 +1361,20 @@ export class MessageStore {
         VALUES (new.id, new.text, new.sender_name);
       END;
 
+      CREATE TRIGGER IF NOT EXISTS embedding_chunks_ad AFTER DELETE ON message_embedding_chunks BEGIN
+        DELETE FROM message_embedding_chunk_messages WHERE chunk_id = old.id;
+      END;
+
       CREATE INDEX IF NOT EXISTS idx_messages_chat_message_id ON messages(chat_id, message_id);
       CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(chat_id, sender_id);
       CREATE INDEX IF NOT EXISTS idx_embedding_chunks_lookup
         ON message_embedding_chunks(chat_id, embedding_model, embedding_dimensions);
       CREATE INDEX IF NOT EXISTS idx_embedding_chunks_range
         ON message_embedding_chunks(chat_id, start_message_id, end_message_id);
+      CREATE INDEX IF NOT EXISTS idx_embedding_chunk_messages_lookup
+        ON message_embedding_chunk_messages(chat_id, message_id);
+      CREATE INDEX IF NOT EXISTS idx_embedding_chunk_messages_chunk_position
+        ON message_embedding_chunk_messages(chunk_id, position);
       CREATE INDEX IF NOT EXISTS idx_send_outbox_chat_status
         ON send_outbox(chat_id, status, expires_at_ms);
       CREATE INDEX IF NOT EXISTS idx_send_outbox_user_status
@@ -1341,6 +1437,55 @@ export class MessageStore {
     `);
   }
 
+  private applyEmbeddingChunkMembershipMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS message_embedding_chunk_messages (
+        chunk_id INTEGER NOT NULL,
+        chat_id TEXT NOT NULL,
+        message_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        PRIMARY KEY(chunk_id, message_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_embedding_chunk_messages_lookup
+        ON message_embedding_chunk_messages(chat_id, message_id);
+      CREATE INDEX IF NOT EXISTS idx_embedding_chunk_messages_chunk_position
+        ON message_embedding_chunk_messages(chunk_id, position);
+      CREATE TRIGGER IF NOT EXISTS embedding_chunks_ad AFTER DELETE ON message_embedding_chunks BEGIN
+        DELETE FROM message_embedding_chunk_messages WHERE chunk_id = old.id;
+      END;
+    `);
+    const chunks = this.db
+      .prepare(
+        `SELECT id, chat_id, start_message_id, end_message_id, message_count
+         FROM message_embedding_chunks
+         ORDER BY id ASC`,
+      )
+      .all() as Record<string, unknown>[];
+    const selectMessages = this.db.prepare(
+      `SELECT message_id
+       FROM messages
+       WHERE chat_id = ?
+         AND message_id BETWEEN ? AND ?
+         AND length(trim(text)) > 0
+         AND deleted_at IS NULL
+       ORDER BY message_id ASC
+       LIMIT ?`,
+    );
+    for (const chunk of chunks) {
+      const rows = selectMessages.all(
+        String(chunk.chat_id),
+        Number(chunk.start_message_id),
+        Number(chunk.end_message_id),
+        Math.max(1, Number(chunk.message_count ?? 1)),
+      ) as Record<string, unknown>[];
+      this.replaceEmbeddingChunkMessagesLocked(
+        Number(chunk.id),
+        String(chunk.chat_id),
+        rows.map((row) => Number(row.message_id)),
+      );
+    }
+  }
+
   private ensureColumn(table: string, column: string, definition: string): void {
     const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[];
     if (!rows.some((row) => row.name === column)) {
@@ -1363,6 +1508,7 @@ export class MessageStore {
       "send_outbox",
       "send_throttle_state",
       "message_embedding_chunks",
+      "message_embedding_chunk_messages",
       "messages_fts",
     ]) {
       this.assertSqliteObject("table", table);
@@ -1373,16 +1519,19 @@ export class MessageStore {
       "idx_chat_aliases_chat_id",
       "idx_embedding_chunks_lookup",
       "idx_embedding_chunks_range",
+      "idx_embedding_chunk_messages_lookup",
+      "idx_embedding_chunk_messages_chunk_position",
       "idx_send_outbox_chat_status",
       "idx_send_outbox_user_status",
     ]) {
       this.assertSqliteObject("index", index);
     }
-    for (const trigger of ["messages_ai", "messages_ad", "messages_au"]) {
+    for (const trigger of ["messages_ai", "messages_ad", "messages_au", "embedding_chunks_ad"]) {
       this.assertSqliteObject("trigger", trigger);
     }
     this.assertColumns("messages", ["id", "chat_id", "message_id", "text", "deleted_at", "updated_at"]);
     this.assertColumns("message_embedding_chunks", ["id", "chat_id", "dirty_at", "updated_at"]);
+    this.assertColumns("message_embedding_chunk_messages", ["chunk_id", "chat_id", "message_id", "position"]);
     this.assertColumns("daemon_status", [
       "service",
       "last_started_at",
@@ -1443,11 +1592,38 @@ export class MessageStore {
     const stmt = this.db.prepare(
       `UPDATE message_embedding_chunks
        SET dirty_at = COALESCE(dirty_at, datetime('now')), updated_at = datetime('now')
-       WHERE chat_id = ? AND start_message_id <= ? AND end_message_id >= ?`,
+       WHERE id IN (
+         SELECT chunk_id
+         FROM message_embedding_chunk_messages
+         WHERE chat_id = ? AND message_id = ?
+       )`,
     );
     for (const messageId of messageIds) {
-      stmt.run(chatId, messageId, messageId);
+      stmt.run(chatId, messageId);
     }
+  }
+
+  private replaceEmbeddingChunkMessagesLocked(chunkId: number, chatId: string, messageIds: number[]): void {
+    this.db.prepare("DELETE FROM message_embedding_chunk_messages WHERE chunk_id = ?").run(chunkId);
+    const stmt = this.db.prepare(
+      `INSERT INTO message_embedding_chunk_messages (chunk_id, chat_id, message_id, position)
+       VALUES (?, ?, ?, ?)`,
+    );
+    for (const [position, messageId] of messageIds.entries()) {
+      stmt.run(chunkId, chatId, messageId, position);
+    }
+  }
+
+  private getEmbeddingChunkMessageIdsLocked(chunkId: number): number[] {
+    const rows = this.db
+      .prepare(
+        `SELECT message_id
+         FROM message_embedding_chunk_messages
+         WHERE chunk_id = ?
+         ORDER BY position ASC`,
+      )
+      .all(chunkId) as Record<string, unknown>[];
+    return rows.map((row) => Number(row.message_id));
   }
 }
 
@@ -1563,6 +1739,7 @@ function rowToEmbeddingChunk(row: Record<string, unknown>): StoredEmbeddingChunk
     chatId: String(row.chat_id),
     startMessageId: Number(row.start_message_id),
     endMessageId: Number(row.end_message_id),
+    messageIds: [],
     messageCount: Number(row.message_count),
     text: String(row.text ?? ""),
     model: String(row.embedding_model),
@@ -1620,6 +1797,13 @@ function countMessageIdRanges(ids: number[]): number {
     previous = id;
   }
   return ranges;
+}
+
+function normalizeChunkMessageIds(messageIds: number[] | undefined, startMessageId: number, endMessageId: number): number[] {
+  const ids = messageIds?.length
+    ? messageIds
+    : Array.from({ length: Math.max(0, endMessageId - startMessageId + 1) }, (_, index) => startMessageId + index);
+  return [...new Set(ids.filter((id) => Number.isSafeInteger(id)))];
 }
 
 function isSqliteBusy(error: unknown): boolean {
