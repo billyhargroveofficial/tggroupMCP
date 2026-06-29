@@ -20,7 +20,7 @@ async function runOnce(): Promise<void> {
     const result = await syncer.syncOnce();
     console.log(stringify({ ok: true, result }));
   } finally {
-    await telegram.disconnect();
+    await disconnectTelegramBestEffort(telegram);
   }
 }
 
@@ -37,31 +37,38 @@ async function runDaemon(): Promise<void> {
   while (true) {
     const started = Date.now();
     let errors: NormalizedError[] = [];
+    let result: SyncOnceResult | undefined;
+    let embeddings: Record<string, unknown> | null | undefined;
+    let tickError: NormalizedError | undefined;
     recordDaemonStarted(store);
     try {
-      const result = await syncer.syncOnce();
+      result = await syncer.syncOnce();
       errors = syncErrors(result);
-      if (errors.length > 0) {
-        recordDaemonFailure(store, errors);
-      } else {
-        recordDaemonSuccess(store);
+      embeddings = await indexEmbeddings(vectorRag, result.chat);
+    } catch (error) {
+      tickError = normalizeError(error);
+      errors = [tickError];
+    } finally {
+      const disconnectError = await disconnectTelegramBestEffort(telegram);
+      if (disconnectError) {
+        errors = [...errors, disconnectError];
       }
-      const embeddings = await indexEmbeddings(vectorRag, result.chat);
+    }
+    recordDaemonOutcome(store, errors);
+    if (tickError) {
+      console.error(
+        `sync tick error ${stringify({ error: tickError, errors, daemonStatus: store.getDaemonStatus() })}`,
+      );
+    } else {
       console.error(
         `sync tick ${stringify({
-          recent: summarize(result.recent),
-          backfill: summarize(result.backfill),
+          recent: summarize(result?.recent),
+          backfill: summarize(result?.backfill),
           embeddings,
+          errors: errors.length > 0 ? errors : undefined,
           daemonStatus: store.getDaemonStatus(),
         })}`,
       );
-    } catch (error) {
-      const normalized = normalizeError(error);
-      errors = [normalized];
-      recordDaemonFailure(store, errors);
-      console.error(`sync tick error ${stringify({ error: normalized, daemonStatus: store.getDaemonStatus() })}`);
-    } finally {
-      await telegram.disconnect();
     }
     stopOnPermanentDaemonErrors(errors);
     const elapsed = Date.now() - started;
@@ -87,6 +94,27 @@ export function syncErrors(result: SyncOnceResult): NormalizedError[] {
 
 export function shouldStopDaemonForErrors(errors: NormalizedError[]): boolean {
   return errors.some((error) => error.category === "auth" && !error.retryable);
+}
+
+export async function disconnectTelegramBestEffort(
+  telegram: Pick<TelegramService, "disconnect">,
+): Promise<NormalizedError | undefined> {
+  try {
+    await telegram.disconnect();
+    return undefined;
+  } catch (error) {
+    const normalized = normalizeError(error);
+    console.error(`telegram disconnect failed ${stringify({ error: normalized })}`);
+    return normalized;
+  }
+}
+
+export function recordDaemonOutcome(store: MessageStore, errors: NormalizedError[]): void {
+  if (errors.length > 0) {
+    recordDaemonFailure(store, errors);
+  } else {
+    recordDaemonSuccess(store);
+  }
 }
 
 export function computeDaemonDelayMs(params: {

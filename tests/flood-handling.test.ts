@@ -5,7 +5,12 @@ import { errors as telegramErrors } from "telegram";
 import type { AppConfig } from "../src/config.js";
 import { normalizeError } from "../src/errors.js";
 import { MessageStore } from "../src/store.js";
-import { computeDaemonDelayMs, shouldStopDaemonForErrors } from "../src/sync-daemon.js";
+import {
+  computeDaemonDelayMs,
+  disconnectTelegramBestEffort,
+  recordDaemonOutcome,
+  shouldStopDaemonForErrors,
+} from "../src/sync-daemon.js";
 import { SendThrottler } from "../src/throttler.js";
 import { telegramClientOptions } from "../src/telegram-client.js";
 
@@ -130,6 +135,35 @@ test("permanent auth errors stop the daemon", () => {
   assert.equal(error.category, "auth");
   assert.equal(error.retryable, false);
   assert.equal(shouldStopDaemonForErrors([error]), true);
+});
+
+test("disconnect failures are recorded and treated as retryable when normalized that way", async () => {
+  const store = new MessageStore(":memory:");
+  store.recordDaemonTickStarted();
+
+  const error = await disconnectTelegramBestEffort({
+    disconnect: async () => {
+      throw new Error("ECONNRESET during disconnect");
+    },
+  });
+
+  assert.equal(error?.category, "internal");
+  assert.equal(error?.retryable, true);
+  recordDaemonOutcome(store, error ? [error] : []);
+  const status = store.getDaemonStatus();
+  assert.match(status?.lastError ?? "", /internal: ECONNRESET during disconnect/);
+  assert.equal(status?.consecutiveFailures, 1);
+
+  const delay = computeDaemonDelayMs({
+    intervalMs: 1_000,
+    elapsedMs: 0,
+    errors: [error!],
+    previousBackoffMs: 0,
+    backoffInitialMs: 5_000,
+    backoffMaxMs: 60_000,
+  });
+  assert.equal(delay.reason, "backoff");
+  assert.equal(delay.delayMs, 5_000);
 });
 
 function config(sync?: Partial<AppConfig["sync"]>): AppConfig {

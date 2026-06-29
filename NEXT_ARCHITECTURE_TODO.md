@@ -978,7 +978,24 @@ Important operating rule:
   - Unit verification passes.
   - Docs include exact install, restart, status, and rollback commands.
 
-- [ ] 25. Record or tolerate disconnect failures in the daemon.
+- [x] 25. Record or tolerate disconnect failures in the daemon.
+
+  Status 2026-06-29: Completed. Telegram disconnect is now best-effort in both one-shot and daemon modes: a rejected
+  `disconnect()` is normalized and logged instead of escaping from `finally`. The daemon records tick success/failure
+  after disconnect, so a disconnect failure updates `daemon_status.lastError` and is included in the same tick's error
+  set. Retryable disconnect failures, such as socket reset/network errors, participate in the existing exponential
+  backoff policy; non-retryable disconnect failures are recorded but otherwise use the normal interval.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/flood-handling.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run build`
+  - `npm test` (109/109)
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run status`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   `telegram.disconnect()` runs in `finally`; if it throws after a tick, the daemon can exit through the fatal handler without recording the disconnect failure in daemon status.
