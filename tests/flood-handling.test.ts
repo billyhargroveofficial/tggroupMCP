@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { errors as telegramErrors } from "telegram";
 import type { AppConfig } from "../src/config.js";
 import { normalizeError } from "../src/errors.js";
+import { MessageStore } from "../src/store.js";
 import { computeDaemonDelayMs, shouldStopDaemonForErrors } from "../src/sync-daemon.js";
+import { SendThrottler } from "../src/throttler.js";
 import { telegramClientOptions } from "../src/telegram-client.js";
 
 test("telegram client options include configured flood sleep threshold", () => {
@@ -36,6 +40,61 @@ test("slow mode retry-after is normalized like flood wait", () => {
   assert.equal(error.category, "rate_limit");
   assert.equal(error.retryable, true);
   assert.equal(error.retryAfterSec, 12);
+});
+
+test("real GramJS flood wait errors expose retry-after seconds", () => {
+  const error = normalizeError(new telegramErrors.FloodWaitError({ capture: "42" }));
+
+  assert.equal(error.category, "rate_limit");
+  assert.equal(error.retryable, true);
+  assert.equal(error.retryAfterSec, 42);
+});
+
+test("real GramJS slow mode errors expose retry-after seconds", () => {
+  const error = normalizeError(new telegramErrors.SlowModeWaitError({ capture: "42" }));
+
+  assert.equal(error.category, "rate_limit");
+  assert.equal(error.retryable, true);
+  assert.equal(error.retryAfterSec, 42);
+});
+
+test("send queue waits for chat flood not-before before dispatching the next job", async () => {
+  const store = new MessageStore(":memory:");
+  const throttler = new SendThrottler(config(), store);
+  const chat = { chatId: "-1001", requested: "-1001", kind: "Fake" as const };
+  let calls = 0;
+
+  const first = throttler.run({
+    chatId: chat.chatId,
+    payloadHash: "first/hash",
+    userKey: "mcp-server",
+    action: async () => {
+      calls += 1;
+      throw new telegramErrors.SlowModeWaitError({ capture: "0.15" });
+    },
+  });
+
+  await assert.rejects(first, /wait of 0.15 seconds/i);
+  assert.equal(calls, 1);
+
+  const started = Date.now();
+  const second = throttler.run({
+    chatId: chat.chatId,
+    payloadHash: "second/hash",
+    userKey: "mcp-server",
+    action: async () => {
+      calls += 1;
+      return { id: 2, chat };
+    },
+  });
+
+  await sleep(50);
+  assert.equal(calls, 1);
+
+  const sent = await second;
+  assert.equal(sent.id, 2);
+  assert.equal(calls, 2);
+  assert.ok(Date.now() - started >= 120);
 });
 
 test("transient network errors use exponential daemon backoff", () => {

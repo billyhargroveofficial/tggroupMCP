@@ -35,17 +35,29 @@ export function normalizeError(error: unknown): NormalizedError {
     };
   }
 
-  const anyError = error as { message?: string; errorMessage?: string; code?: number };
+  const anyError = error as {
+    message?: string;
+    errorMessage?: string;
+    code?: number;
+    seconds?: unknown;
+    name?: string;
+    constructor?: { name?: string };
+  };
   const message = String(anyError?.errorMessage || anyError?.message || error || "Unknown error");
+  const className = String(anyError?.constructor?.name ?? "");
+  const errorName = String(anyError?.name ?? "");
+  const telegramTypeSource = className || errorName || anyError?.errorMessage || "";
   const upper = message.toUpperCase();
-  const waitMatch = upper.match(/(?:FLOOD_WAIT|SLOWMODE_WAIT)_?(\d+)/);
+  const typeUpper = [className, errorName, anyError?.errorMessage, message].filter(Boolean).join(" ").toUpperCase();
+  const waitMatch = typeUpper.match(/(?:FLOOD(?:_PREMIUM)?_WAIT|SLOWMODE_WAIT)_?(\d+(?:\.\d+)?)/);
+  const retryAfterSec = waitMatch ? Number(waitMatch[1]) : retryAfterSeconds(anyError?.seconds);
 
-  if (waitMatch) {
+  if (waitMatch || isGramJsFloodWait(typeUpper, anyError?.code, retryAfterSec)) {
     return {
       category: "rate_limit",
       telegramCode: anyError?.code,
-      telegramType: waitMatch[0],
-      retryAfterSec: Number(waitMatch[1]),
+      telegramType: waitMatch?.[0] ?? telegramTypeSource,
+      retryAfterSec,
       retryable: true,
       message,
     };
@@ -120,6 +132,28 @@ export function normalizeError(error: unknown): NormalizedError {
     retryable: false,
     message,
   };
+}
+
+function retryAfterSeconds(value: unknown): number | undefined {
+  if (value == null) {
+    return undefined;
+  }
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
+function isGramJsFloodWait(typeUpper: string, code: number | undefined, retryAfterSec: number | undefined): boolean {
+  if (retryAfterSec == null) {
+    return false;
+  }
+  return (
+    code === 420 ||
+    typeUpper.includes("FLOODWAITERROR") ||
+    typeUpper.includes("SLOWMODEWAITERROR") ||
+    typeUpper.includes("FLOOD_WAIT") ||
+    typeUpper.includes("SLOWMODE_WAIT") ||
+    typeUpper.includes("FLOOD")
+  );
 }
 
 export function ok<T extends Record<string, unknown>>(value: T): { ok: true } & T {

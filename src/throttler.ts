@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
-import { ToolError } from "./errors.js";
+import { normalizeError, ToolError, type NormalizedError } from "./errors.js";
 import { MessageStore } from "./store.js";
 import type { ChatInfo } from "./telegram-client.js";
 
@@ -22,6 +22,9 @@ type QueueJob = {
 export class SendThrottler {
   private readonly chatQueues = new Map<string, QueueJob[]>();
   private readonly runningPerChat = new Map<string, number>();
+  private readonly chatNotBeforeMs = new Map<string, number>();
+  private wakeTimer: ReturnType<typeof setTimeout> | undefined;
+  private wakeAtMs: number | undefined;
   private runningGlobal = 0;
 
   constructor(
@@ -114,7 +117,9 @@ export class SendThrottler {
             }
           },
           (error: unknown) => {
-            const message = error instanceof Error ? error.message : String(error);
+            const normalized = normalizeError(error);
+            this.rememberRateLimit(job.chatId, normalized);
+            const message = normalized.message;
             try {
               this.store.markSendFailed(job.outboxId, message);
               job.reject(error);
@@ -133,7 +138,31 @@ export class SendThrottler {
 
   private pickNextRunnableJob(): QueueJob | undefined {
     const now = Date.now();
+    let earliestNotBeforeMs: number | undefined;
     for (const [chatId, queue] of this.chatQueues) {
+      while (queue.length > 0) {
+        const job = queue[0]!;
+        if (now - job.createdAt <= this.config.throttle.maxAgeMs && now < job.expiresAt) {
+          break;
+        }
+        queue.shift();
+        this.expireQueuedJob(job);
+      }
+      if (queue.length === 0) {
+        continue;
+      }
+      if ((this.runningPerChat.get(chatId) ?? 0) >= this.config.throttle.maxRunningPerChat) {
+        continue;
+      }
+      const notBeforeMs = this.chatNotBeforeMs.get(chatId);
+      if (notBeforeMs != null) {
+        if (now < notBeforeMs) {
+          earliestNotBeforeMs =
+            earliestNotBeforeMs == null ? notBeforeMs : Math.min(earliestNotBeforeMs, notBeforeMs);
+          continue;
+        }
+        this.chatNotBeforeMs.delete(chatId);
+      }
       while (queue.length > 0) {
         const job = queue[0]!;
         if (now - job.createdAt > this.config.throttle.maxAgeMs || now >= job.expiresAt) {
@@ -141,12 +170,10 @@ export class SendThrottler {
           this.expireQueuedJob(job);
           continue;
         }
-        if ((this.runningPerChat.get(chatId) ?? 0) >= this.config.throttle.maxRunningPerChat) {
-          break;
-        }
         return queue.shift();
       }
     }
+    this.scheduleWake(earliestNotBeforeMs, now);
     return undefined;
   }
 
@@ -169,5 +196,31 @@ export class SendThrottler {
   private releaseRunningJob(job: QueueJob): void {
     this.runningGlobal = Math.max(0, this.runningGlobal - 1);
     this.runningPerChat.set(job.chatId, Math.max(0, (this.runningPerChat.get(job.chatId) ?? 1) - 1));
+  }
+
+  private rememberRateLimit(chatId: string, error: NormalizedError): void {
+    if (error.category !== "rate_limit" || error.retryAfterSec == null || error.retryAfterSec <= 0) {
+      return;
+    }
+    const notBeforeMs = Date.now() + error.retryAfterSec * 1000;
+    this.chatNotBeforeMs.set(chatId, Math.max(this.chatNotBeforeMs.get(chatId) ?? 0, notBeforeMs));
+  }
+
+  private scheduleWake(notBeforeMs: number | undefined, nowMs: number): void {
+    if (notBeforeMs == null) {
+      return;
+    }
+    if (this.wakeTimer && this.wakeAtMs != null && this.wakeAtMs <= notBeforeMs) {
+      return;
+    }
+    if (this.wakeTimer) {
+      clearTimeout(this.wakeTimer);
+    }
+    this.wakeAtMs = notBeforeMs;
+    this.wakeTimer = setTimeout(() => {
+      this.wakeTimer = undefined;
+      this.wakeAtMs = undefined;
+      this.schedule();
+    }, Math.max(1, notBeforeMs - nowMs));
   }
 }

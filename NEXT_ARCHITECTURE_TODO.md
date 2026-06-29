@@ -163,7 +163,20 @@ Important operating rule:
   - Ambiguous post-send crashes never auto-send duplicates.
   - Tests simulate queued, sending, expired, failed, and sent rows across a fresh tools/store instance.
 
-- [ ] 5. Normalize real GramJS flood and slowmode errors.
+- [x] 5. Normalize real GramJS flood and slowmode errors.
+
+  Status 2026-06-29: Completed. Error normalization now recognizes real GramJS flood/slowmode objects via
+  their class/name/type metadata plus `error.seconds`, including `FloodWaitError` and `SlowModeWaitError` instances
+  whose `errorMessage` is only `FLOOD`. Daemon delay already honored normalized `retryAfterSec`; coverage now proves
+  that real GramJS errors produce retryable rate-limit errors. The send throttler now records a per-chat not-before
+  timestamp after chat-level flood/slowmode failures and delays the next queued job for that chat until the retry-after
+  window has passed.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/flood-handling.test.ts --test-reporter=spec`
+  - `node --test --import tsx tests/send-safety.test.ts --test-reporter=spec`
+  - `npm run check`
 
   Problem:
   Error normalization handles string patterns like `FLOOD_WAIT_30`, but real GramJS `FloodWaitError` and `SlowModeWaitError` expose `errorMessage` and `seconds`. These currently normalize as non-retryable internal errors, so daemon backoff and send throttling can ignore Telegram retry-after semantics.
