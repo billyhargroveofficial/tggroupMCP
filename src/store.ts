@@ -343,6 +343,46 @@ export class MessageStore {
     return rows.map(rowToStoredMessage);
   }
 
+  getMessagesNeedingEmbedding(params: {
+    chatId: string;
+    model: string;
+    dimensions?: number;
+    afterId?: number;
+    limit: number;
+  }): StoredMessage[] {
+    const clauses = [
+      "m.chat_id = ?",
+      "length(trim(m.text)) > 0",
+      "m.deleted_at IS NULL",
+      `NOT EXISTS (
+        SELECT 1
+        FROM message_embedding_chunks c
+        WHERE c.chat_id = m.chat_id
+          AND c.embedding_model = ?
+          AND (? IS NULL OR c.embedding_dimensions = ?)
+          AND c.dirty_at IS NULL
+          AND c.start_message_id <= m.message_id
+          AND c.end_message_id >= m.message_id
+      )`,
+    ];
+    const values: unknown[] = [params.chatId, params.model, params.dimensions ?? null, params.dimensions ?? null];
+    if (params.afterId != null) {
+      clauses.push("m.message_id > ?");
+      values.push(params.afterId);
+    }
+    values.push(params.limit);
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT m.*
+         FROM messages m
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY m.message_id ASC
+         LIMIT ?`,
+      )
+      .all(...toSqlValues(values)) as Record<string, unknown>[];
+    return rows.map(rowToStoredMessage);
+  }
+
   getMessagesInRange(params: { chatId: string; startMessageId: number; endMessageId: number; limit?: number }): StoredMessage[] {
     const limit = params.limit ?? 100;
     const rows = this.db
@@ -515,12 +555,60 @@ export class MessageStore {
     });
   }
 
+  deleteDirtyEmbeddingChunks(params: { chatId: string; model: string; dimensions?: number }): number {
+    const clauses = ["chat_id = ?", "embedding_model = ?", "dirty_at IS NOT NULL"];
+    const values: unknown[] = [params.chatId, params.model];
+    if (params.dimensions != null) {
+      clauses.push("embedding_dimensions = ?");
+      values.push(params.dimensions);
+    }
+    return this.writeWithRetry("deleteDirtyEmbeddingChunks", () => {
+      const result = this.db.prepare(`DELETE FROM message_embedding_chunks WHERE ${clauses.join(" AND ")}`).run(...toSqlValues(values));
+      return Number(result.changes ?? 0);
+    });
+  }
+
+  deleteDirtyEmbeddingChunksForRanges(params: {
+    chatId: string;
+    model: string;
+    dimensions?: number;
+    ranges: Array<{ startMessageId: number; endMessageId: number }>;
+  }): number {
+    if (params.ranges.length === 0) {
+      return 0;
+    }
+    return this.immediateTransaction("deleteDirtyEmbeddingChunksForRanges", () => {
+      let deleted = 0;
+      const clauses = [
+        "chat_id = ?",
+        "embedding_model = ?",
+        "dirty_at IS NOT NULL",
+        "start_message_id <= ?",
+        "end_message_id >= ?",
+      ];
+      if (params.dimensions != null) {
+        clauses.push("embedding_dimensions = ?");
+      }
+      const stmt = this.db.prepare(`DELETE FROM message_embedding_chunks WHERE ${clauses.join(" AND ")}`);
+      for (const range of params.ranges) {
+        const values: unknown[] = [params.chatId, params.model, range.endMessageId, range.startMessageId];
+        if (params.dimensions != null) {
+          values.push(params.dimensions);
+        }
+        const result = stmt.run(...toSqlValues(values));
+        deleted += Number(result.changes ?? 0);
+      }
+      return deleted;
+    });
+  }
+
   getEmbeddingChunks(params: {
     chatId: string;
     model: string;
     dimensions?: number;
     beforeId?: number;
     afterId?: number;
+    includeDirty?: boolean;
   }): StoredEmbeddingChunk[] {
     const clauses = ["chat_id = ?", "embedding_model = ?"];
     const values: unknown[] = [params.chatId, params.model];
@@ -536,6 +624,9 @@ export class MessageStore {
       clauses.push("end_message_id > ?");
       values.push(params.afterId);
     }
+    if (!params.includeDirty) {
+      clauses.push("dirty_at IS NULL");
+    }
     const rows = this.db
       .prepare(
         `SELECT * FROM message_embedding_chunks
@@ -547,7 +638,7 @@ export class MessageStore {
   }
 
   getEmbeddingStats(chatId: string): Array<Record<string, unknown>> {
-    return this.db
+    const rows = this.db
       .prepare(
         `SELECT
            embedding_model AS model,
@@ -564,6 +655,79 @@ export class MessageStore {
          ORDER BY updated_at DESC`,
       )
       .all(chatId) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      ...row,
+      ...this.getEmbeddingCoverageStats({
+        chatId,
+        model: String(row.model),
+        dimensions: Number(row.dimensions),
+      }),
+    }));
+  }
+
+  getEmbeddingCoverageStats(params: { chatId: string; model: string; dimensions?: number }): Record<string, number> {
+    const values = [params.chatId, params.model, params.dimensions ?? null, params.dimensions ?? null] as const;
+    const cache = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM messages
+         WHERE chat_id = ? AND length(trim(text)) > 0 AND deleted_at IS NULL`,
+      )
+      .get(params.chatId) as Record<string, unknown> | undefined;
+    const indexed = this.db
+      .prepare(
+        `SELECT COUNT(DISTINCT m.id) AS count
+         FROM messages m
+         WHERE m.chat_id = ?
+           AND length(trim(m.text)) > 0
+           AND m.deleted_at IS NULL
+           AND EXISTS (
+             SELECT 1
+             FROM message_embedding_chunks c
+             WHERE c.chat_id = m.chat_id
+               AND c.embedding_model = ?
+               AND (? IS NULL OR c.embedding_dimensions = ?)
+               AND c.dirty_at IS NULL
+               AND c.start_message_id <= m.message_id
+               AND c.end_message_id >= m.message_id
+           )`,
+      )
+      .get(...values) as Record<string, unknown> | undefined;
+    const uncoveredRows = this.db
+      .prepare(
+        `SELECT m.message_id
+         FROM messages m
+         WHERE m.chat_id = ?
+           AND length(trim(m.text)) > 0
+           AND m.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM message_embedding_chunks c
+             WHERE c.chat_id = m.chat_id
+               AND c.embedding_model = ?
+               AND (? IS NULL OR c.embedding_dimensions = ?)
+               AND c.dirty_at IS NULL
+               AND c.start_message_id <= m.message_id
+               AND c.end_message_id >= m.message_id
+           )
+         ORDER BY m.message_id ASC`,
+      )
+      .all(...values) as Record<string, unknown>[];
+    const dirty = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM message_embedding_chunks
+         WHERE chat_id = ? AND embedding_model = ? AND (? IS NULL OR embedding_dimensions = ?) AND dirty_at IS NOT NULL`,
+      )
+      .get(...values) as Record<string, unknown> | undefined;
+
+    return {
+      cache_messages: Number(cache?.count ?? 0),
+      indexed_messages: Number(indexed?.count ?? 0),
+      uncovered_messages: uncoveredRows.length,
+      uncovered_ranges: countMessageIdRanges(uncoveredRows.map((row) => Number(row.message_id))),
+      dirty_chunks: Number(dirty?.count ?? 0),
+    };
   }
 
   reserveSend(params: {
@@ -1444,6 +1608,18 @@ function escapeFtsQuery(query: string): string {
 
 function toSqlValues(values: unknown[]): SQLInputValue[] {
   return values as SQLInputValue[];
+}
+
+function countMessageIdRanges(ids: number[]): number {
+  let ranges = 0;
+  let previous: number | undefined;
+  for (const id of ids) {
+    if (previous == null || id !== previous + 1) {
+      ranges += 1;
+    }
+    previous = id;
+  }
+  return ranges;
 }
 
 function isSqliteBusy(error: unknown): boolean {

@@ -473,6 +473,13 @@ Embeddings may remain disabled until this section is done.
 
 ### 15. Replace high-water vector cursor with coverage tracking
 
+Status 2026-06-29: Completed while keeping embeddings opt-in disabled by default. Vector indexing no longer uses only `MAX(end_message_id)` as a forward cursor. `MessageStore` now scans cached messages that are not covered by a clean chunk for the configured model/dimension, treats dirty chunks as uncovered, excludes dirty chunks from vector search, and reports coverage counters (`cache_messages`, `indexed_messages`, `uncovered_messages`, `uncovered_ranges`, `dirty_chunks`) in embedding stats and index estimates/results. `VectorRag` builds chunks from uncovered/dirty cached messages, so recent-index-then-backfill-index covers older messages without rebuild, and edited messages marked dirty are reindexed before search uses them again.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec` (48 passed)
+- `npm run check`
+
 Problem:
 Vector indexing uses a single forward cursor. If recent messages are indexed before older backfill arrives, older backfilled messages are skipped forever without rebuild.
 

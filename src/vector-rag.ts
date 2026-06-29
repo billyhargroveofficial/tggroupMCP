@@ -12,6 +12,8 @@ export type EmbeddingIndexResult = {
   messagesCovered: number;
   nextAfterMessageId?: number;
   deletedChunks?: number;
+  dirtyChunksDeleted?: number;
+  coverage: Record<string, number>;
   stats: Array<Record<string, unknown>>;
 };
 
@@ -26,6 +28,7 @@ export type EmbeddingIndexEstimate = {
   estimatedMessages: number;
   estimatedChars: number;
   existingChunks: number;
+  coverage: Record<string, number>;
   firstRun: boolean;
   requiresConfirmation: boolean;
   privacy: string;
@@ -96,17 +99,13 @@ export class VectorRag {
           dimensions: this.config.embeddings.dimensions,
         })
       : undefined;
-    let afterMessageId =
-      params.afterMessageId ??
-      (params.rebuild
-        ? undefined
-        : this.store.getEmbeddingCursor({
-            chatId: params.chatId,
-            model: this.config.embeddings.model,
-            dimensions: this.config.embeddings.dimensions,
-          }));
+    let afterMessageId = params.afterMessageId;
 
-    const inputs = this.buildChunks(params.chatId, afterMessageId, limitChunks);
+    const inputs = this.buildChunks(params.chatId, {
+      afterMessageId,
+      limitChunks,
+      includeCovered: params.rebuild,
+    });
     let chunksCreated = 0;
     let messagesCovered = 0;
 
@@ -117,6 +116,17 @@ export class VectorRag {
       messagesCovered += batch.reduce((sum, chunk) => sum + chunk.messageCount, 0);
       afterMessageId = batch[batch.length - 1]?.endMessageId ?? afterMessageId;
     }
+    const dirtyChunksDeleted = params.rebuild
+      ? undefined
+      : this.store.deleteDirtyEmbeddingChunksForRanges({
+          chatId: params.chatId,
+          model: this.config.embeddings.model,
+          dimensions: this.config.embeddings.dimensions,
+          ranges: inputs.map((chunk) => ({
+            startMessageId: chunk.startMessageId,
+            endMessageId: chunk.endMessageId,
+          })),
+        });
 
     return {
       ok: true,
@@ -127,6 +137,12 @@ export class VectorRag {
       messagesCovered,
       nextAfterMessageId: afterMessageId,
       deletedChunks,
+      dirtyChunksDeleted,
+      coverage: this.store.getEmbeddingCoverageStats({
+        chatId: params.chatId,
+        model: this.config.embeddings.model,
+        dimensions: this.config.embeddings.dimensions,
+      }),
       stats: this.store.getEmbeddingStats(params.chatId),
     };
   }
@@ -140,16 +156,11 @@ export class VectorRag {
     this.embeddings.assertConfigured();
     const limitChunks = Math.max(1, params.limitChunks ?? this.config.embeddings.tickChunkLimit);
     const stats = this.store.getEmbeddingStats(params.chatId);
-    const afterMessageId =
-      params.afterMessageId ??
-      (params.rebuild
-        ? undefined
-        : this.store.getEmbeddingCursor({
-            chatId: params.chatId,
-            model: this.config.embeddings.model,
-            dimensions: this.config.embeddings.dimensions,
-          }));
-    const inputs = this.buildChunks(params.chatId, afterMessageId, limitChunks);
+    const inputs = this.buildChunks(params.chatId, {
+      afterMessageId: params.afterMessageId,
+      limitChunks,
+      includeCovered: params.rebuild,
+    });
     const existingChunks = stats.reduce((sum, row) => sum + Number(row.chunks ?? 0), 0);
     const estimatedChunks = inputs.length;
     const firstRun = existingChunks === 0;
@@ -165,6 +176,11 @@ export class VectorRag {
       estimatedMessages: inputs.reduce((sum, chunk) => sum + chunk.messageCount, 0),
       estimatedChars: inputs.reduce((sum, chunk) => sum + chunk.text.length, 0),
       existingChunks,
+      coverage: this.store.getEmbeddingCoverageStats({
+        chatId: params.chatId,
+        model: this.config.embeddings.model,
+        dimensions: this.config.embeddings.dimensions,
+      }),
       firstRun,
       requiresConfirmation: firstRun && estimatedChunks > 0,
       privacy: "Embedding indexing sends cached Telegram message text to the configured external embeddings provider.",
@@ -250,14 +266,19 @@ export class VectorRag {
     return results.sort((left, right) => right.score - left.score).slice(0, limit);
   }
 
-  private buildChunks(chatId: string, afterMessageId: number | undefined, limitChunks: number): EmbeddingChunkInput[] {
+  private buildChunks(
+    chatId: string,
+    params: { afterMessageId?: number; limitChunks: number; includeCovered?: boolean },
+  ): EmbeddingChunkInput[] {
     const chunks: EmbeddingChunkInput[] = [];
-    let cursor = afterMessageId;
+    let cursor = params.afterMessageId;
     let buffer: StoredMessage[] = [];
     let bufferChars = 0;
+    let previousMessageId: number | undefined;
+    const fetchLimit = Math.max(this.config.embeddings.chunkMessages * params.limitChunks * 2, 500);
 
     const flush = (): void => {
-      if (buffer.length === 0 || chunks.length >= limitChunks) {
+      if (buffer.length === 0 || chunks.length >= params.limitChunks) {
         return;
       }
       const first = buffer[0]!;
@@ -273,23 +294,35 @@ export class VectorRag {
       bufferChars = 0;
     };
 
-    while (chunks.length < limitChunks) {
-      const messages = this.store.getMessagesForEmbedding({
-        chatId,
-        afterId: cursor,
-        limit: Math.max(this.config.embeddings.chunkMessages * limitChunks * 2, 500),
-      });
+    while (chunks.length < params.limitChunks) {
+      const messages = params.includeCovered
+        ? this.store.getMessagesForEmbedding({
+            chatId,
+            afterId: cursor,
+            limit: fetchLimit,
+          })
+        : this.store.getMessagesNeedingEmbedding({
+            chatId,
+            model: this.config.embeddings.model,
+            dimensions: this.config.embeddings.dimensions,
+            afterId: cursor,
+            limit: fetchLimit,
+          });
       if (messages.length === 0) {
         break;
       }
 
       for (const message of messages) {
         cursor = message.messageId;
+        if (previousMessageId != null && message.messageId !== previousMessageId + 1) {
+          flush();
+        }
+        previousMessageId = message.messageId;
         const formatted = formatMessage(message);
         if (buffer.length > 0 && bufferChars + formatted.length > this.config.embeddings.chunkMaxChars) {
           flush();
         }
-        if (chunks.length >= limitChunks) {
+        if (chunks.length >= params.limitChunks) {
           break;
         }
         buffer.push(message);
@@ -299,12 +332,12 @@ export class VectorRag {
         }
       }
 
-      if (messages.length < Math.max(this.config.embeddings.chunkMessages * limitChunks * 2, 500)) {
+      if (messages.length < fetchLimit) {
         break;
       }
     }
     flush();
-    return chunks.slice(0, limitChunks);
+    return chunks.slice(0, params.limitChunks);
   }
 
   private toVectorHit(chunk: StoredEmbeddingChunk, score: number, rank: number, includeMessages: boolean): VectorSearchHit {
