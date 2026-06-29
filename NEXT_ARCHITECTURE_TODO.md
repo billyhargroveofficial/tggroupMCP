@@ -19,7 +19,19 @@ Important operating rule:
 
 ## P1 - Fix Before Trusting More Autonomy
 
-- [ ] 1. Make boolean env parsing fail closed.
+- [x] 1. Make boolean env parsing fail closed.
+
+  Status 2026-06-29: Completed. Boolean env parsing now uses a strict `BOOLEAN_ENV_RULES` table and accepts only
+  `1,true,yes,on` or `0,false,no,off`. Present-but-empty boolean values are invalid; operators must omit the variable
+  to use the built-in default. Malformed values name the offending env var and fail during `loadConfig()` /
+  `npm run validate-config`, so typoed allowlist or send-safety booleans cannot silently evaluate false.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/config-validation.test.ts --test-reporter=spec`
+  - `node --test --import tsx tests/embeddings-opt-in.test.ts --test-reporter=spec`
+  - `env TELEGRAM_SEND_ENABLED=maybe npm run validate-config` (expected failure naming `TELEGRAM_SEND_ENABLED`)
+  - `npm run validate-config`
 
   Problem:
   `boolFromEnv` treats any non-empty value outside `1,true,yes,on` as `false`. A typo such as `TELEGRAM_REQUIRE_ALLOWLIST=tru` silently disables the allowlist, and typoed safety flags can silently miss hard dry-run or approval behavior.

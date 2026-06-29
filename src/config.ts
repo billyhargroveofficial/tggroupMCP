@@ -37,6 +37,10 @@ export type NumericEnvRule = {
   max: number;
 };
 
+export type BooleanEnvRule = {
+  fallback: boolean;
+};
+
 export const NUMERIC_ENV_RULES = {
   TELEGRAM_API_ID: { fallback: 0, min: 0, max: INT32_MAX },
   TELEGRAM_CONNECTION_RETRIES: { fallback: 5, min: 0, max: 100 },
@@ -76,6 +80,16 @@ export const NUMERIC_ENV_RULES = {
 
 type NumericEnvName = keyof typeof NUMERIC_ENV_RULES;
 
+export const BOOLEAN_ENV_RULES = {
+  TELEGRAM_REQUIRE_ALLOWLIST: { fallback: true },
+  TELEGRAM_SEND_ENABLED: { fallback: true },
+  TELEGRAM_DRY_RUN_DEFAULT: { fallback: false },
+  TELEGRAM_LIVE_SEND_APPROVAL_BYPASS: { fallback: false },
+  TELEGRAM_EMBEDDINGS_ENABLED: { fallback: false },
+} as const satisfies Record<string, BooleanEnvRule>;
+
+type BooleanEnvName = keyof typeof BOOLEAN_ENV_RULES;
+
 const intFromEnv = (name: NumericEnvName): number => {
   const rule = NUMERIC_ENV_RULES[name];
   validateInteger(name, rule.fallback, rule);
@@ -102,12 +116,30 @@ function validateInteger(name: string, value: number, rule: NumericEnvRule): voi
   }
 }
 
-const boolFromEnv = (name: string, fallback: boolean): boolean => {
+const TRUE_BOOL_VALUES = new Set(["1", "true", "yes", "on"]);
+const FALSE_BOOL_VALUES = new Set(["0", "false", "no", "off"]);
+
+const boolFromEnv = (name: BooleanEnvName): boolean => {
+  const rule = BOOLEAN_ENV_RULES[name];
   const raw = process.env[name];
-  if (raw == null || raw.trim() === "") {
-    return fallback;
+  if (raw == null) {
+    return rule.fallback;
   }
-  return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "") {
+    throw new Error(
+      `${name} must be a boolean: one of 1,true,yes,on or 0,false,no,off; empty values are invalid, unset the variable to use the default ${String(rule.fallback)}.`,
+    );
+  }
+  if (TRUE_BOOL_VALUES.has(normalized)) {
+    return true;
+  }
+  if (FALSE_BOOL_VALUES.has(normalized)) {
+    return false;
+  }
+  throw new Error(
+    `${name} must be a boolean: one of 1,true,yes,on or 0,false,no,off; got ${JSON.stringify(raw)}.`,
+  );
 };
 
 const csv = (raw: string | undefined): string[] =>
@@ -214,18 +246,18 @@ export function loadConfig(): AppConfig {
       phone: process.env.TELEGRAM_PHONE?.trim() || "",
       defaultChatId,
       allowedChatIds: allowed.length > 0 ? allowed : [defaultChatId],
-      requireAllowlistedChat: boolFromEnv("TELEGRAM_REQUIRE_ALLOWLIST", true),
+      requireAllowlistedChat: boolFromEnv("TELEGRAM_REQUIRE_ALLOWLIST"),
       connectionRetries: intFromEnv("TELEGRAM_CONNECTION_RETRIES"),
     },
     storage: {
       dbPath,
     },
     safety: {
-      sendEnabled: boolFromEnv("TELEGRAM_SEND_ENABLED", true),
-      dryRunDefault: boolFromEnv("TELEGRAM_DRY_RUN_DEFAULT", false),
+      sendEnabled: boolFromEnv("TELEGRAM_SEND_ENABLED"),
+      dryRunDefault: boolFromEnv("TELEGRAM_DRY_RUN_DEFAULT"),
       maxSendChars: intFromEnv("TELEGRAM_MAX_SEND_CHARS"),
       liveSendApprovalTtlMs: intFromEnv("TELEGRAM_LIVE_SEND_APPROVAL_TTL_MS"),
-      liveSendApprovalBypass: boolFromEnv("TELEGRAM_LIVE_SEND_APPROVAL_BYPASS", false),
+      liveSendApprovalBypass: boolFromEnv("TELEGRAM_LIVE_SEND_APPROVAL_BYPASS"),
     },
     sync: {
       batchSize: intFromEnv("TELEGRAM_HISTORY_BATCH_SIZE"),
@@ -240,7 +272,7 @@ export function loadConfig(): AppConfig {
       transientBackoffMaxMs: intFromEnv("TELEGRAM_SYNC_BACKOFF_MAX_MS"),
     },
     embeddings: {
-      enabled: boolFromEnv("TELEGRAM_EMBEDDINGS_ENABLED", false),
+      enabled: boolFromEnv("TELEGRAM_EMBEDDINGS_ENABLED"),
       apiKey: embeddingApiKey,
       baseUrl: process.env.TELEGRAM_EMBEDDINGS_BASE_URL?.trim() || "https://api.openai.com/v1",
       model: process.env.TELEGRAM_EMBEDDINGS_MODEL?.trim() || "text-embedding-3-small",

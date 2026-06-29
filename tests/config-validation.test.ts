@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { loadConfig, NUMERIC_ENV_RULES } from "../src/config.js";
+import { BOOLEAN_ENV_RULES, loadConfig, NUMERIC_ENV_RULES } from "../src/config.js";
 
 test("every numeric env field rejects values below its allowed range", () => {
   for (const [name, rule] of Object.entries(NUMERIC_ENV_RULES)) {
@@ -31,6 +31,38 @@ test("numeric env fields reject floats and NaN with actionable env names", () =>
       );
     });
   }
+});
+
+test("boolean env fields reject malformed and empty values with actionable env names", () => {
+  for (const name of Object.keys(BOOLEAN_ENV_RULES)) {
+    for (const raw of ["treu", "maybe", "2", ""]) {
+      withEnv({ [name]: raw }, () => {
+        assert.throws(
+          () => loadConfig(),
+          new RegExp(`${name} must be a boolean`),
+        );
+      });
+    }
+  }
+});
+
+test("boolean env fields accept only explicit true and false spellings", () => {
+  for (const name of Object.keys(BOOLEAN_ENV_RULES)) {
+    for (const raw of ["1", "true", "yes", "on", "0", "false", "no", "off"]) {
+      withEnv({ [name]: raw }, () => {
+        assert.doesNotThrow(() => loadConfig());
+      });
+    }
+  }
+});
+
+test("allowlist cannot be disabled by a boolean typo", () => {
+  withEnv({ TELEGRAM_REQUIRE_ALLOWLIST: "tru" }, () => {
+    assert.throws(
+      () => loadConfig(),
+      /TELEGRAM_REQUIRE_ALLOWLIST must be a boolean/,
+    );
+  });
 });
 
 test("cross-field validation rejects a backoff max below initial backoff", () => {

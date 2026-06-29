@@ -28,7 +28,7 @@ class FakeTelegram {
 }
 
 test("OPENAI_API_KEY alone does not enable daemon embeddings", async () => {
-  await withEnv({ OPENAI_API_KEY: "test-key", TELEGRAM_EMBEDDINGS_ENABLED: "" }, async (dbPath) => {
+  await withEnv({ OPENAI_API_KEY: "test-key", TELEGRAM_EMBEDDINGS_ENABLED: "false" }, async (dbPath) => {
     const config = loadConfig();
     const store = new MessageStore(dbPath);
     const vectorRag = new VectorRag(config, store);
