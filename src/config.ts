@@ -156,7 +156,7 @@ export function loadConfig(): AppConfig {
       backfillLimit: intFromEnv("TELEGRAM_SYNC_BACKFILL_LIMIT", 1_000),
     },
     embeddings: {
-      enabled: boolFromEnv("TELEGRAM_EMBEDDINGS_ENABLED", Boolean(embeddingApiKey)),
+      enabled: boolFromEnv("TELEGRAM_EMBEDDINGS_ENABLED", false),
       apiKey: embeddingApiKey,
       baseUrl: process.env.TELEGRAM_EMBEDDINGS_BASE_URL?.trim() || "https://api.openai.com/v1",
       model: process.env.TELEGRAM_EMBEDDINGS_MODEL?.trim() || "text-embedding-3-small",

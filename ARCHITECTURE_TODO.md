@@ -172,10 +172,10 @@ Acceptance criteria:
 - Busy retries are logged with bounded attempts.
 - Long write transactions remain small enough not to block reads for too long.
 
-### 7. Make embeddings explicit opt-in
+### 7. Harden embeddings opt-in
 
 Problem:
-`OPENAI_API_KEY` currently implies embeddings are configured/enabled by default. If that key appears in the environment, private chat text can be sent to an external embeddings API by accident.
+The reviewers found that `OPENAI_API_KEY` implied embeddings were configured/enabled by default. The default has been changed so `TELEGRAM_EMBEDDINGS_ENABLED=true` is required, but the first indexing run still needs stronger privacy and cost visibility.
 
 Relevant files:
 
@@ -186,7 +186,7 @@ Relevant files:
 
 TODO:
 
-- Require `TELEGRAM_EMBEDDINGS_ENABLED=true` explicitly.
+- Keep `TELEGRAM_EMBEDDINGS_ENABLED=true` as an explicit opt-in requirement.
 - Do not auto-enable embeddings merely because `OPENAI_API_KEY` exists.
 - Before first indexing run, report provider, model, dimensions, chat, estimated chunks, and estimated chars.
 - Keep embeddings disabled in production until this is done.

@@ -39,13 +39,13 @@ npm run sync-once
 
 ## Vector RAG
 
-Set `OPENAI_API_KEY` or `TELEGRAM_EMBEDDINGS_API_KEY`, then index cached messages into local SQLite vector chunks:
+Embeddings are disabled unless explicitly opted in. Set `TELEGRAM_EMBEDDINGS_ENABLED=true` plus `OPENAI_API_KEY` or `TELEGRAM_EMBEDDINGS_API_KEY`, then index cached messages into local SQLite vector chunks:
 
 ```bash
 npm run embed-once -- --limit-chunks 1000
 ```
 
-The regular sync daemon also indexes new chunks when embeddings are configured. `search_messages` returns keyword, vector, and hybrid candidates; `semantic_search_messages` returns only cosine-ranked chunks.
+The regular sync daemon also indexes new chunks only when embeddings are explicitly enabled and configured. `search_messages` returns keyword, vector, and hybrid candidates; `semantic_search_messages` returns only cosine-ranked chunks.
 
 MCP config example:
 
