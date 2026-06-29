@@ -199,6 +199,10 @@ export class MessageStore {
     return Number(row?.user_version ?? 0);
   }
 
+  close(): void {
+    this.db.close();
+  }
+
   upsertChat(chat: ChatInfo): void {
     this.writeWithRetry("upsertChat", () => this.upsertChatLocked(chat));
   }
@@ -929,27 +933,39 @@ export class MessageStore {
            )`,
       )
       .get(...values) as Record<string, unknown> | undefined;
-    const uncoveredRows = this.db
+    const uncovered = this.db
       .prepare(
-        `SELECT m.message_id
-         FROM messages m
-         WHERE m.chat_id = ?
-           AND length(trim(m.text)) > 0
-           AND m.deleted_at IS NULL
-           AND NOT EXISTS (
-             SELECT 1
-             FROM message_embedding_chunk_messages cm
-             JOIN message_embedding_chunks c ON c.id = cm.chunk_id
-             WHERE cm.chat_id = m.chat_id
-               AND cm.message_id = m.message_id
-               AND c.embedding_namespace = ?
-               AND c.embedding_model = ?
-               AND (? IS NULL OR c.embedding_dimensions = ?)
-               AND c.dirty_at IS NULL
-           )
-         ORDER BY m.message_id ASC`,
+        `WITH uncovered AS (
+           SELECT
+             m.message_id,
+             LAG(m.message_id) OVER (ORDER BY m.message_id ASC) AS previous_message_id
+           FROM messages m
+           WHERE m.chat_id = ?
+             AND length(trim(m.text)) > 0
+             AND m.deleted_at IS NULL
+             AND NOT EXISTS (
+               SELECT 1
+               FROM message_embedding_chunk_messages cm
+               JOIN message_embedding_chunks c ON c.id = cm.chunk_id
+               WHERE cm.chat_id = m.chat_id
+                 AND cm.message_id = m.message_id
+                 AND c.embedding_namespace = ?
+                 AND c.embedding_model = ?
+                 AND (? IS NULL OR c.embedding_dimensions = ?)
+                 AND c.dirty_at IS NULL
+             )
+         )
+         SELECT
+           COUNT(*) AS messages,
+           COALESCE(SUM(
+             CASE
+               WHEN previous_message_id IS NULL OR message_id != previous_message_id + 1 THEN 1
+               ELSE 0
+             END
+           ), 0) AS ranges
+         FROM uncovered`,
       )
-      .all(...values) as Record<string, unknown>[];
+      .get(...values) as Record<string, unknown> | undefined;
     const dirty = this.db
       .prepare(
         `SELECT COUNT(*) AS count
@@ -961,8 +977,8 @@ export class MessageStore {
     return {
       cache_messages: Number(cache?.count ?? 0),
       indexed_messages: Number(indexed?.count ?? 0),
-      uncovered_messages: uncoveredRows.length,
-      uncovered_ranges: countMessageIdRanges(uncoveredRows.map((row) => Number(row.message_id))),
+      uncovered_messages: Number(uncovered?.messages ?? 0),
+      uncovered_ranges: Number(uncovered?.ranges ?? 0),
       dirty_chunks: Number(dirty?.count ?? 0),
     };
   }
@@ -2356,18 +2372,6 @@ function normalizeSql(sql: string): string {
 
 function hashSql(sql: string): string {
   return createHash("sha256").update(normalizeSql(sql)).digest("hex");
-}
-
-function countMessageIdRanges(ids: number[]): number {
-  let ranges = 0;
-  let previous: number | undefined;
-  for (const id of ids) {
-    if (previous == null || id !== previous + 1) {
-      ranges += 1;
-    }
-    previous = id;
-  }
-  return ranges;
 }
 
 function normalizeChunkMessageIds(messageIds: number[] | undefined, startMessageId: number, endMessageId: number): number[] {

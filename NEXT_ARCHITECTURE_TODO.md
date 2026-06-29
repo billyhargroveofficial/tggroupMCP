@@ -854,7 +854,26 @@ Important operating rule:
   - Large chunk backfills do not make normal startup hold long write locks.
   - Operators get a clear maintenance command or status when heavy migration work is pending.
 
-- [ ] 22. Make embedding coverage stats bounded.
+- [x] 22. Make embedding coverage stats bounded.
+
+  Status 2026-06-29: Completed. `getEmbeddingCoverageStats()` no longer materializes every uncovered message id in
+  JavaScript. Uncovered message count and uncovered contiguous range count are computed inside SQLite with a CTE and
+  `LAG()` window function, preserving exact counts while keeping Node memory bounded. The vector benchmark script now
+  has a synthetic coverage mode that builds a temporary zero-embedding cache and measures status/estimate coverage
+  behavior at large sizes.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/vector-rag.test.ts tests/tools-response.test.ts --test-reporter=spec`
+  - `npm run benchmark:vector -- --coverage-messages 500000 --coverage-target-ms 5000` returned `ok:true` with
+    `durationMs:1219.7`, `rssDeltaMb:0.11`, and exact coverage counts for 500000 uncovered messages / 1 range
+  - `npm run check`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run status`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   `getEmbeddingCoverageStats()` materializes every uncovered message ID into JS to compute counts/ranges. On 500k-message caches with no embeddings, status or estimates can become expensive.
