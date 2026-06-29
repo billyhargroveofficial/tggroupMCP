@@ -22,6 +22,12 @@ async function main(): Promise<void> {
   const telegram = new TelegramService(config);
   const store = new MessageStore(config.storage.dbPath);
   const tools = new TelegramTools(config, telegram, store);
+  if (process.argv.includes("--status")) {
+    const result = await tools.callTool("get_status", {});
+    console.log(result.content[0]?.text ?? stringify({ ok: false, error: { message: "Status tool returned no content." } }));
+    return;
+  }
+
   const server = new Server(
     { name: "telegram-parilka-mcp", version: "0.1.0" },
     { capabilities: { tools: {} } },

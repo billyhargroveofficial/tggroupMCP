@@ -45,6 +45,18 @@ export type DaemonStatus = {
   updatedAt?: string;
 };
 
+export type ChatCacheStatus = {
+  chatId: string;
+  messages: {
+    count: number;
+    oldestMessageId?: number;
+    newestMessageId?: number;
+  };
+  syncState: SyncState | null;
+  daemonStatus: DaemonStatus | null;
+  embeddings: Array<Record<string, unknown>>;
+};
+
 export type KeywordSearchHit = {
   message: StoredMessage;
   rank: number;
@@ -1037,6 +1049,26 @@ export class MessageStore {
     return row == null ? undefined : rowToDaemonStatus(row);
   }
 
+  getChatStatus(chatId: string): ChatCacheStatus {
+    const messageStats = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count, MIN(message_id) AS oldest_message_id, MAX(message_id) AS newest_message_id
+         FROM messages WHERE chat_id = ?`,
+      )
+      .get(chatId) as Record<string, unknown>;
+    return {
+      chatId,
+      messages: {
+        count: Number(messageStats.count ?? 0),
+        oldestMessageId: optionalNumber(messageStats.oldest_message_id),
+        newestMessageId: optionalNumber(messageStats.newest_message_id),
+      },
+      syncState: this.getSyncState(chatId) ?? null,
+      daemonStatus: this.getDaemonStatus() ?? null,
+      embeddings: this.getEmbeddingStats(chatId),
+    };
+  }
+
   getStats(chatId: string): Record<string, unknown> {
     const messageStats = this.db
       .prepare(
@@ -1710,6 +1742,10 @@ function normalizeChatAlias(chat: string): string {
     return `@${trimmed.toLowerCase()}`;
   }
   return trimmed;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return value == null ? undefined : Number(value);
 }
 
 function rowToSyncState(row: Record<string, unknown>): SyncState {

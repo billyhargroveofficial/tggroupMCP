@@ -56,6 +56,24 @@ systemctl --user status telegram-parilka-mcp-sync.service
 journalctl --user -u telegram-parilka-mcp-sync.service -n 100 --no-pager
 ```
 
+## Health Status
+
+Use the cache-only status command for a quick operational read:
+
+```bash
+cd /root/telegram-parilka-mcp
+npm run status
+```
+
+The JSON includes service config summary, cache message count and oldest/newest IDs, sync timestamps and last error,
+backfill exhaustion, daemon last started/success/failure status, and embedding coverage. It does not connect to
+Telegram or call an embeddings provider.
+
+Alert thresholds are included in the `health.thresholds` field. With the default 60s daemon interval, warning lag is
+5 minutes and critical lag is 30 minutes for both recent sync and daemon success. Treat
+`daemonCriticalFailures` (3 consecutive failures by default) as critical immediately. `unknown` usually means a fresh DB
+or a daemon that has not written status yet; run one sync pass and recheck.
+
 ## Vector RAG
 
 Configure an OpenAI-compatible embeddings endpoint:

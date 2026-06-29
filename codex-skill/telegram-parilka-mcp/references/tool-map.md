@@ -5,6 +5,7 @@ Default chat: `-1003179772905` (`Парилка228`). All tools accept optional 
 ## Read Tools
 
 - `get_config`: return redacted config, default chat, allowlist, dry-run state, and throttle settings.
+- `get_status`: return cache-only service health, sync state, daemon last-run status, and embedding coverage.
 - `resolve_chat`: resolve and cache a Telegram peer. Use before important actions.
 - `get_chat_info`: resolve chat and return local SQLite cache stats.
 - `sync_history`: backfill history into SQLite. Use bounded pages; the server returns `status`, `chat`, `stats`, and metadata, not a huge message dump.

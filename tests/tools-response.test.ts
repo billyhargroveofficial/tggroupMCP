@@ -71,8 +71,42 @@ test("sync_history exposes failed status, chat, and stats", async () => {
   assert.equal(typeof result.stats, "object");
 });
 
-function makeTools(): TelegramTools {
-  return new TelegramTools(config(), new FakeTelegram() as unknown as TelegramService, new MessageStore(":memory:"));
+test("get_status reports cache health without Telegram network calls", async () => {
+  const store = new MessageStore(":memory:");
+  store.upsertMessages(CHAT, [
+    {
+      chatId: CHAT.chatId,
+      messageId: 42,
+      text: "status message",
+    },
+  ]);
+  store.updateSyncState(CHAT, {
+    oldestMessageId: 42,
+    newestMessageId: 42,
+    syncedCount: 1,
+    mode: "recent",
+    error: "transient sync issue",
+  });
+  store.setBackfillExhausted(CHAT, true);
+  store.recordDaemonTickStarted();
+  store.recordDaemonTickFailure("rate_limit: FLOOD_WAIT_30");
+
+  const result = await callTool(makeTools(store), "get_status", {});
+
+  assert.equal(result.ok, true);
+  assert.equal((result.health as { status: string }).status, "degraded");
+  assert.equal((result.chat as { chatId: string }).chatId, CHAT.chatId);
+  assert.equal((result.chat as { kind: string }).kind, "Fake");
+  assert.equal((result.cache as { messageCount: number }).messageCount, 1);
+  assert.equal((result.cache as { oldestMessageId: number }).oldestMessageId, 42);
+  assert.equal((result.sync as { backfillExhausted: boolean }).backfillExhausted, true);
+  assert.equal((result.sync as { lastError?: string }).lastError, "transient sync issue");
+  assert.equal((result.daemon as { lastError?: string }).lastError, "rate_limit: FLOOD_WAIT_30");
+  assert.equal(Array.isArray((result.embeddings as { coverage?: unknown }).coverage), true);
+});
+
+function makeTools(store = new MessageStore(":memory:")): TelegramTools {
+  return new TelegramTools(config(), new FakeTelegram() as unknown as TelegramService, store);
 }
 
 function config(): AppConfig {

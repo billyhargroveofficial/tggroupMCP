@@ -37,6 +37,15 @@ One-shot mode, useful for cron/systemd timers:
 npm run sync-once
 ```
 
+Check cache, daemon, sync, and embedding coverage health without touching Telegram:
+
+```bash
+npm run status
+```
+
+Status is `ok`, `degraded`, `critical`, or `unknown`. Alert on `critical` immediately, and investigate `degraded`
+when recent sync or daemon success lag is above the warning threshold shown in the JSON.
+
 SQLite uses WAL plus a busy timeout and bounded retry for write coordination, so the MCP server, sync daemon, and
 embedding indexer can share the same DB. Keep any custom/manual write transactions small so reads and other writers do
 not sit behind long locks.

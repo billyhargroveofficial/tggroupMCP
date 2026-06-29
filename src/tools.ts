@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { fail, ok, ToolError } from "./errors.js";
 import { stringify } from "./json.js";
-import { MessageStore } from "./store.js";
+import { MessageStore, type ChatCacheStatus } from "./store.js";
 import { type ChatInfo, TelegramService } from "./telegram-client.js";
 import { SendThrottler } from "./throttler.js";
 import { HistorySyncer } from "./sync-engine.js";
@@ -49,6 +49,13 @@ export class TelegramTools {
         name: "get_config",
         description: "Return redacted Telegram Parilka MCP configuration and safety state.",
         inputSchema: objectSchema({}),
+      },
+      {
+        name: "get_status",
+        description: "Return cache-only service health, sync, daemon, and embedding coverage status.",
+        inputSchema: objectSchema({
+          chat: stringProp("Chat ID, @username, or omitted for TELEGRAM_DEFAULT_CHAT_ID."),
+        }),
       },
       {
         name: "resolve_chat",
@@ -188,6 +195,8 @@ export class TelegramTools {
       switch (name) {
         case "get_config":
           return jsonTool(ok({ config: this.safeConfig() }));
+        case "get_status":
+          return jsonTool(this.getStatus(rawArgs));
         case "resolve_chat":
           return jsonTool(await this.resolveChat(rawArgs));
         case "get_chat_info":
@@ -248,6 +257,51 @@ export class TelegramTools {
       },
       throttle: this.config.throttle,
     };
+  }
+
+  private getStatus(rawArgs: unknown): Record<string, unknown> {
+    const args = chatSchema.parse(rawArgs ?? {});
+    const chat = this.cacheChat(args.chat);
+    const status = this.store.getChatStatus(chat.chatId);
+    return ok({
+      health: healthSummary(status, this.config.sync.intervalMs),
+      service: {
+        dbPath: this.config.storage.dbPath,
+        isTelegramConfigured: this.telegram.isConfigured,
+        sendEnabled: this.config.safety.sendEnabled,
+        dryRunDefault: this.config.safety.dryRunDefault,
+        defaultChatId: this.config.telegram.defaultChatId,
+        allowedChatIds: this.config.telegram.allowedChatIds,
+        sync: {
+          intervalMs: this.config.sync.intervalMs,
+          recentLimit: this.config.sync.recentLimit,
+          backfillLimit: this.config.sync.backfillLimit,
+          historyOperationTimeoutMs: this.config.sync.historyOperationTimeoutMs,
+        },
+      },
+      chat,
+      cache: {
+        messageCount: status.messages.count,
+        oldestMessageId: status.messages.oldestMessageId,
+        newestMessageId: status.messages.newestMessageId,
+      },
+      sync: {
+        lastRecentSyncAt: status.syncState?.lastRecentSyncAt,
+        lastBackfillAt: status.syncState?.lastBackfillAt,
+        lastError: status.syncState?.lastError,
+        backfillExhausted: Boolean(status.syncState?.backfillExhaustedAt),
+        backfillExhaustedAt: status.syncState?.backfillExhaustedAt,
+        state: status.syncState,
+      },
+      daemon: status.daemonStatus,
+      embeddings: {
+        enabled: this.config.embeddings.enabled,
+        configured: Boolean(this.config.embeddings.apiKey),
+        model: this.config.embeddings.model,
+        dimensions: this.config.embeddings.dimensions,
+        coverage: status.embeddings,
+      },
+    });
   }
 
   private async resolveChat(rawArgs: unknown): Promise<Record<string, unknown>> {
@@ -782,4 +836,92 @@ function syncOnceStatus(result: SyncOnceResult): "done" | "failed" | "partial" |
     return "failed";
   }
   return "partial";
+}
+
+type HealthIssue = {
+  severity: "unknown" | "warning" | "critical";
+  message: string;
+};
+
+function healthSummary(status: ChatCacheStatus, intervalMs: number): Record<string, unknown> {
+  const thresholds = healthThresholds(intervalMs);
+  const recentLagMs = timestampAgeMs(status.syncState?.lastRecentSyncAt);
+  const daemonSuccessLagMs = timestampAgeMs(status.daemonStatus?.lastSuccessAt);
+  const issues: HealthIssue[] = [];
+
+  if (!status.syncState) {
+    issues.push({ severity: "unknown", message: "No sync_state row has been recorded for this chat." });
+  } else {
+    if (status.syncState.lastError) {
+      issues.push({ severity: "warning", message: `Last sync error: ${status.syncState.lastError}` });
+    }
+    if (recentLagMs == null) {
+      issues.push({ severity: "warning", message: "Recent sync has not recorded a successful timestamp yet." });
+    } else if (recentLagMs >= thresholds.recentCriticalMs) {
+      issues.push({ severity: "critical", message: "Recent sync lag is above the critical threshold." });
+    } else if (recentLagMs >= thresholds.recentWarningMs) {
+      issues.push({ severity: "warning", message: "Recent sync lag is above the warning threshold." });
+    }
+  }
+
+  if (!status.daemonStatus) {
+    issues.push({ severity: "unknown", message: "No daemon_status row has been recorded yet." });
+  } else {
+    if (status.daemonStatus.consecutiveFailures >= thresholds.daemonCriticalFailures) {
+      issues.push({ severity: "critical", message: "Daemon has reached the critical consecutive failure threshold." });
+    } else if (status.daemonStatus.consecutiveFailures > 0) {
+      issues.push({ severity: "warning", message: "Daemon has consecutive failures." });
+    }
+    if (daemonSuccessLagMs == null) {
+      issues.push({ severity: "warning", message: "Daemon has not recorded a successful tick yet." });
+    } else if (daemonSuccessLagMs >= thresholds.daemonSuccessCriticalMs) {
+      issues.push({ severity: "critical", message: "Daemon success lag is above the critical threshold." });
+    } else if (daemonSuccessLagMs >= thresholds.daemonSuccessWarningMs) {
+      issues.push({ severity: "warning", message: "Daemon success lag is above the warning threshold." });
+    }
+  }
+
+  const state = issues.some((issue) => issue.severity === "critical")
+    ? "critical"
+    : issues.some((issue) => issue.severity === "warning")
+      ? "degraded"
+      : issues.some((issue) => issue.severity === "unknown")
+        ? "unknown"
+        : "ok";
+
+  return {
+    status: state,
+    checkedAt: new Date().toISOString(),
+    recentLagMs,
+    daemonSuccessLagMs,
+    thresholds,
+    issues,
+  };
+}
+
+function healthThresholds(intervalMs: number): Record<string, number> {
+  return {
+    recentWarningMs: Math.max(intervalMs * 3, 5 * 60_000),
+    recentCriticalMs: Math.max(intervalMs * 10, 30 * 60_000),
+    daemonSuccessWarningMs: Math.max(intervalMs * 3, 5 * 60_000),
+    daemonSuccessCriticalMs: Math.max(intervalMs * 10, 30 * 60_000),
+    daemonCriticalFailures: 3,
+  };
+}
+
+function timestampAgeMs(timestamp: string | undefined): number | undefined {
+  const parsed = parseTimestampMs(timestamp);
+  if (parsed == null) {
+    return undefined;
+  }
+  return Math.max(0, Date.now() - parsed);
+}
+
+function parseTimestampMs(timestamp: string | undefined): number | undefined {
+  if (!timestamp) {
+    return undefined;
+  }
+  const normalized = timestamp.includes("T") ? timestamp : `${timestamp.replace(" ", "T")}Z`;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }

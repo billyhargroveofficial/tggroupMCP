@@ -687,6 +687,16 @@ Acceptance criteria:
 
 ### 22. Add health/status observability
 
+Status 2026-06-29: Completed. Added cache-only `get_status` MCP tool and `npm run status` CLI path. The status payload includes redacted service/config summary, chat cache message count plus oldest/newest IDs, sync timestamps, last sync error, backfill exhausted state, daemon last-start/success/failure row from the existing `daemon_status` table, and embedding coverage for indexed models. Health is classified as `ok`, `degraded`, `critical`, or `unknown` with explicit recent-sync, daemon-success, and consecutive-failure thresholds. README, runbook, and tool map now document the status command and alertable lag thresholds.
+
+Verification 2026-06-29:
+
+- `node --test --import tsx tests/tools-response.test.ts --test-reporter=spec` (4 passed)
+- `npm run check`
+- `npm run status`
+- `npm test -- --test-reporter=spec` (60 passed)
+- `npm run smoke:mcp`
+
 Problem:
 Observability is mostly journal logs and DB inspection.
 
