@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AppConfig } from "../src/config.js";
+import { vectorToBlob } from "../src/embeddings.js";
 import { MessageStore } from "../src/store.js";
 import type { ChatInfo } from "../src/telegram-client.js";
 import { VectorRag } from "../src/vector-rag.js";
@@ -239,6 +240,87 @@ test("embedding indexing respects chunk and character budgets", async (t) => {
   const charEstimate = charBudgetRag.estimateIndexCachedMessages({ chatId: CHAT.chatId, limitChunks: 10 });
   assert.equal(charEstimate.estimatedChunks, 0);
   assert.equal(charEstimate.budget.truncatedByCharBudget, true);
+});
+
+test("embedding dimension mismatch fails indexing clearly", async (t) => {
+  mockFetch(t, async () =>
+    new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0, 0] }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const store = new MessageStore(":memory:");
+  const vectorRag = new VectorRag(config({ dimensions: 2 }), store);
+  store.upsertMessages(CHAT, [{ chatId: CHAT.chatId, messageId: 1, senderName: "alice", text: "plain alpha" }]);
+
+  await assert.rejects(
+    () =>
+      vectorRag.indexCachedMessages({
+        chatId: CHAT.chatId,
+        limitChunks: 1,
+        confirmFirstRun: true,
+      }),
+    /Embedding API returned 3 dimensions for input 0; expected TELEGRAM_EMBEDDINGS_DIMENSIONS=2/,
+  );
+  assert.equal(
+    store.getEmbeddingChunks({
+      chatId: CHAT.chatId,
+      model: config().embeddings.model,
+      dimensions: 2,
+    }).length,
+    0,
+  );
+});
+
+test("vector search uses actual query dimensions for mixed indexes", async (t) => {
+  mockFetch(t, async () =>
+    new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const store = new MessageStore(":memory:");
+  const vectorRag = new VectorRag(config({ dimensions: undefined }), store);
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 1, senderName: "alice", text: "two dimensional needle" },
+    { chatId: CHAT.chatId, messageId: 2, senderName: "bob", text: "three dimensional distractor" },
+  ]);
+  store.upsertEmbeddingChunks([
+    {
+      chatId: CHAT.chatId,
+      startMessageId: 1,
+      endMessageId: 1,
+      messageIds: [1],
+      messageCount: 1,
+      text: "two dimensional needle",
+      model: config().embeddings.model,
+      dimensions: 2,
+      embedding: vectorToBlob([1, 0]),
+      contentHash: "two",
+    },
+    {
+      chatId: CHAT.chatId,
+      startMessageId: 2,
+      endMessageId: 2,
+      messageIds: [2],
+      messageCount: 1,
+      text: "three dimensional distractor",
+      model: config().embeddings.model,
+      dimensions: 3,
+      embedding: vectorToBlob([1, 0, 0]),
+      contentHash: "three",
+    },
+  ]);
+
+  const result = await vectorRag.search({ chatId: CHAT.chatId, query: "needle", limit: 10, includeMessages: true });
+
+  assert.equal(result.hits.length, 1);
+  assert.equal(result.hits[0]?.chunk.dimensions, 2);
+  assert.equal(result.hits[0]?.messages[0]?.messageId, 1);
+  assert.deepEqual(
+    result.stats.map((row) => row.dimensions).sort(),
+    [2, 3],
+  );
 });
 
 function mockEmbeddingFetch(t: { after(fn: () => void): void }): void {

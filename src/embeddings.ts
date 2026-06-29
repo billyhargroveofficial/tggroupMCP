@@ -141,6 +141,17 @@ export class EmbeddingClient {
         message: "Embedding API returned an unexpected response shape.",
       });
     }
+    const expectedDimensions = this.config.embeddings.dimensions;
+    if (expectedDimensions != null) {
+      const mismatchIndex = vectors.findIndex((vector) => vector?.length !== expectedDimensions);
+      if (mismatchIndex >= 0) {
+        throw new ToolError({
+          category: "internal",
+          retryable: false,
+          message: `Embedding API returned ${vectors[mismatchIndex]?.length ?? 0} dimensions for input ${mismatchIndex}; expected TELEGRAM_EMBEDDINGS_DIMENSIONS=${expectedDimensions}.`,
+        });
+      }
+    }
     return vectors as number[][];
   }
 

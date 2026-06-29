@@ -565,6 +565,13 @@ Acceptance criteria:
 
 ### 18. Enforce embedding dimensions and model consistency
 
+Status 2026-06-29: Completed. The embedding client now rejects provider responses whose vector length does not match configured `TELEGRAM_EMBEDDINGS_DIMENSIONS`, with a clear non-retryable error before chunks are written. Vector search uses the actual query vector dimension when selecting chunks, filters by model plus dimension, and fails closed if a mixed-dimension chunk ever reaches comparison. Embedding stats already group by model and dimension, and coverage remains model/dimension-scoped.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec` (55 passed)
+- `npm run check`
+
 Problem:
 Providers may ignore requested dimensions. Ingest stores actual length, while search filters by configured dimensions. Mixed dimensions can lead to zero hits or partial comparisons.
 

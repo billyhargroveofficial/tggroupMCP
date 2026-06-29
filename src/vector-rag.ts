@@ -245,13 +245,22 @@ export class VectorRag {
 
     const limit = Math.max(1, Math.min(params.limit ?? this.config.embeddings.searchLimit, 50));
     const queryVector = await this.embeddings.embedQuery(params.query);
+    const searchDimensions = this.config.embeddings.dimensions ?? queryVector.length;
     const chunks = this.store.getEmbeddingChunks({
       chatId: params.chatId,
       model: this.config.embeddings.model,
-      dimensions: this.config.embeddings.dimensions,
+      dimensions: searchDimensions,
       beforeId: params.beforeId,
       afterId: params.afterId,
     });
+    const mismatchedChunk = chunks.find((chunk) => chunk.dimensions !== queryVector.length);
+    if (mismatchedChunk) {
+      throw new ToolError({
+        category: "internal",
+        retryable: false,
+        message: `Refusing mixed-dimension vector comparison: query has ${queryVector.length} dimensions but chunk ${mismatchedChunk.id} has ${mismatchedChunk.dimensions}.`,
+      });
+    }
 
     const scored = chunks
       .map((chunk) => ({ chunk, score: cosineSimilarity(queryVector, blobToVector(chunk.embedding)) }))
