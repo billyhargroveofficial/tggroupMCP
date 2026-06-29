@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -63,6 +63,57 @@ test("validate-config CLI fails before startup on invalid config", () => {
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /TELEGRAM_GLOBAL_CONCURRENCY must be an integer between 1 and 1000/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("configured dotenv files are parsed without shell execution", () => {
+  const dir = mkdtempSync(join(tmpdir(), "telegram-config-env-file-test-"));
+  const sharedEnv = join(dir, "shared.env");
+  const localEnv = join(dir, "local.env");
+  const marker = join(dir, "should-not-exist");
+  const localDefaultChat = `$(touch ${marker})`;
+  try {
+    writeFileSync(
+      sharedEnv,
+      [
+        "TELEGRAM_DEFAULT_CHAT_ID=-100shared",
+        "TELEGRAM_ALLOWED_CHAT_IDS=-100shared",
+        "TELEGRAM_SEND_ENABLED=true",
+      ].join("\n"),
+    );
+    writeFileSync(
+      localEnv,
+      [
+        `TELEGRAM_DEFAULT_CHAT_ID=${localDefaultChat}`,
+        `TELEGRAM_ALLOWED_CHAT_IDS=${localDefaultChat}`,
+        "TELEGRAM_SEND_ENABLED=true",
+      ].join("\n"),
+    );
+
+    const result = spawnSync(process.execPath, ["--import", "tsx", "src/index.ts", "--print-config"], {
+      cwd: process.cwd(),
+      env: {
+        HOME: dir,
+        PATH: process.env.PATH ?? "",
+        TELEGRAM_SHARED_ENV_PATH: sharedEnv,
+        TELEGRAM_ENV_PATH: localEnv,
+        TELEGRAM_DB_PATH: join(dir, "messages.sqlite"),
+        TELEGRAM_SEND_ENABLED: "false",
+      },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(marker), false);
+    const config = JSON.parse(result.stdout) as {
+      telegram: { defaultChatId: string; allowedChatIds: string[] };
+      safety: { sendEnabled: boolean };
+    };
+    assert.equal(config.telegram.defaultChatId, localDefaultChat);
+    assert.deepEqual(config.telegram.allowedChatIds, [localDefaultChat]);
+    assert.equal(config.safety.sendEnabled, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

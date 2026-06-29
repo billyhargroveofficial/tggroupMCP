@@ -721,6 +721,22 @@ Acceptance criteria:
 
 ### 23. Replace shell-sourced env wrappers
 
+Status 2026-06-29: Completed. Bin wrappers no longer source or execute `.env`; they derive the project directory from their own location, allow `TELEGRAM_PROJECT_DIR` override, `cd` there, and exec the built Node entrypoint. TypeScript config now owns dotenv parsing consistently: real process environment wins, `TELEGRAM_SHARED_ENV_PATH` defaults to `~/.config/telegram-mcp/.env`, and `TELEGRAM_ENV_PATH` defaults to `<project>/.env` from the current working directory and can override shared dotenv values only. The runbook documents this precedence once. A spawn test proves configured dotenv files are parsed without executing shell syntax, local dotenv overrides shared dotenv, and real process env still wins. The queued-send expiry test was also made deterministic after this verification run exposed its 5ms timing flake.
+
+Verification 2026-06-29:
+
+- `bash -n bin/telegram-parilka-mcp bin/telegram-parilka-mcp-sync-daemon bin/telegram-parilka-mcp-embed-index bin/telegram-parilka-mcp-generate-session`
+- `npx --yes shellcheck bin/telegram-parilka-mcp bin/telegram-parilka-mcp-sync-daemon bin/telegram-parilka-mcp-embed-index bin/telegram-parilka-mcp-generate-session`
+- `node --test --import tsx tests/config-validation.test.ts --test-reporter=spec` (6 passed)
+- `node --test --import tsx tests/send-safety.test.ts --test-reporter=spec` (8 passed)
+- `npm run print-config`
+- `npm run validate-config`
+- `npm run check`
+- `npm test -- --test-reporter=spec` (61 passed)
+- `npm run smoke:mcp`
+- `npm run build`
+- `./bin/telegram-parilka-mcp --print-config`
+
 Problem:
 Wrappers source env files as shell. TypeScript config uses dotenv parsing, but wrappers execute `.env` content and hard-code `/root`.
 

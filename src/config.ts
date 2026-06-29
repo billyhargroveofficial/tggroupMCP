@@ -8,8 +8,13 @@ const DEFAULT_PARILKA_CHAT_ID = "-1003179772905";
 const INITIAL_ENV_KEYS = new Set(Object.keys(process.env));
 const INT32_MAX = 2_147_483_647;
 
-loadEnvFile("/root/.config/telegram-mcp/.env", false);
-loadEnvFile(resolve(process.cwd(), ".env"), true);
+loadEnvFile(configuredEnvPath("TELEGRAM_SHARED_ENV_PATH", "~/.config/telegram-mcp/.env"), false);
+loadEnvFile(configuredEnvPath("TELEGRAM_ENV_PATH", resolve(process.cwd(), ".env")), true);
+
+function configuredEnvPath(name: string, fallback: string): string {
+  const raw = process.env[name]?.trim();
+  return expandPath(raw || fallback);
+}
 
 function loadEnvFile(path: string, preferOverLoadedFile: boolean): void {
   if (!existsSync(path)) {

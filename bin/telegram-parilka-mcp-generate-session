@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /root/telegram-parilka-mcp
-if [[ -f /root/telegram-parilka-mcp/.env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  . /root/telegram-parilka-mcp/.env
-  set +a
-fi
-exec node /root/telegram-parilka-mcp/dist/generate-session.js "$@"
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="${TELEGRAM_PROJECT_DIR:-$(cd -- "$script_dir/.." && pwd)}"
+cd "$project_dir"
+
+exec node "$project_dir/dist/generate-session.js" "$@"

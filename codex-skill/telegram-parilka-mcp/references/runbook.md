@@ -9,7 +9,15 @@ npm run build
 ./bin/telegram-parilka-mcp --print-config
 ```
 
-The wrapper reads `/root/.config/telegram-mcp/.env` first when present, then `/root/telegram-parilka-mcp/.env`. Local `.env` values override the shared env.
+Wrappers derive the project directory from their own location, or from `TELEGRAM_PROJECT_DIR` when set, then exec the
+built Node entrypoint. They do not source `.env` as shell.
+
+Environment precedence is handled by TypeScript config with dotenv parsing:
+
+1. Real process environment wins and is never overridden by dotenv files.
+2. `TELEGRAM_SHARED_ENV_PATH` is parsed first; default is `~/.config/telegram-mcp/.env`.
+3. `TELEGRAM_ENV_PATH` is parsed second; default is `<project>/.env` from the current working directory. It can override
+   values from the shared dotenv file, but not real process environment variables.
 
 ## Session Generation
 

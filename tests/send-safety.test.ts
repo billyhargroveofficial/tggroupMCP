@@ -254,18 +254,23 @@ test("failed sends can retry with the same dedupe key", async () => {
 test("queued sends expire before execution", async () => {
   const telegram = new FakeTelegram();
   let releaseFirst!: () => void;
+  let markFirstStarted!: () => void;
   const firstGate = new Promise<void>((resolve) => {
     releaseFirst = resolve;
   });
+  const firstStarted = new Promise<void>((resolve) => {
+    markFirstStarted = resolve;
+  });
   telegram.onSend = async (callNumber) => {
     if (callNumber === 1) {
+      markFirstStarted();
       await firstGate;
     }
   };
   const { tools, store } = makeTools(telegram, {
     throttle: {
       userCooldownMs: 0,
-      maxAgeMs: 5,
+      maxAgeMs: 50,
       globalConcurrency: 1,
       maxRunningPerChat: 1,
     },
@@ -283,6 +288,7 @@ test("queued sends expire before execution", async () => {
     approval_id: firstPreview.approval_id,
     dedupe_key: "dedupe/first",
   });
+  await firstStarted;
   const secondSend = callTool(tools, "send_message", {
     text: "second",
     dry_run: false,
@@ -290,7 +296,7 @@ test("queued sends expire before execution", async () => {
     dedupe_key: "dedupe/second",
   });
 
-  await sleep(20);
+  await sleep(80);
   releaseFirst();
 
   assert.equal((await firstSend).ok, true);
