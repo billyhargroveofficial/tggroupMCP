@@ -812,7 +812,27 @@ Important operating rule:
   - Tests cover `https://user:pass@example.test?api_key=x&foo=bar`.
   - Redacted output preserves host/path and non-secret params while hiding credentials.
 
-- [ ] 21. Version FTS/trigger definitions and make heavy migrations resumable.
+- [x] 21. Version FTS/trigger definitions and make heavy migrations resumable.
+
+  Status 2026-06-29: Completed. Schema version is now 10. Startup now records explicit versions and hashes for managed
+  SQLite objects in `schema_object_versions`, compares real `sqlite_master.sql` against the expected FTS/trigger SQL,
+  and repairs stale `messages_fts`, `messages_ai`, `messages_ad`, `messages_au`, and `embedding_chunks_ad`
+  definitions. Heavy repair work is bounded: small FTS rebuilds and embedding membership backfills still complete
+  inline, while large FTS rebuilds or chunk-membership backfills create `maintenance_jobs` rows instead of looping
+  through all rows inside startup migration. `get_status` / `npm run status` expose pending maintenance jobs; the live
+  DB migrated to user_version 10 with `maintenance_jobs` empty.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/store-migrations.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run status`
+  - `npm run smoke:mcp:wrapper`
+  - live DB probe: `PRAGMA user_version` returned `10`; `schema_object_versions`, `maintenance_jobs`, `messages_fts`, and `messages_ai` were present; 5 managed object versions were recorded
 
   Problem:
   Startup migrations mostly validate object existence, not exact FTS/trigger definitions. Large FTS rebuilds and embedding membership backfills can run inside startup transactions and block peer processes.

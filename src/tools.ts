@@ -319,6 +319,7 @@ export class TelegramTools {
         dimensions: this.config.embeddings.dimensions,
         coverage: status.embeddings,
       },
+      maintenance: status.maintenance,
     });
   }
 

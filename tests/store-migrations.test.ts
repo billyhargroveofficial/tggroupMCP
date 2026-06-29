@@ -31,11 +31,11 @@ test("old fixture DB migrates once and rebuilds FTS for historical rows", (t) =>
 
   const store = new MessageStore(dbPath);
 
-  assert.equal(store.getSchemaVersion(), 9);
+  assert.equal(store.getSchemaVersion(), 10);
   assert.equal(store.search({ chatId: "-1001", query: "historical", limit: 10 }).length, 1);
 
   const reopened = new MessageStore(dbPath);
-  assert.equal(reopened.getSchemaVersion(), 9);
+  assert.equal(reopened.getSchemaVersion(), 10);
   assert.equal(reopened.search({ chatId: "-1001", query: "searchable", limit: 10 })[0]?.messageId, 1);
 });
 
@@ -162,7 +162,7 @@ test("version 5 fixture without send tables migrates send audit schema", (t) => 
 
   const store = new MessageStore(dbPath);
 
-  assert.equal(store.getSchemaVersion(), 9);
+  assert.equal(store.getSchemaVersion(), 10);
   assert.equal(store.search({ chatId: "-1001", query: "preexisting", limit: 10 })[0]?.messageId, 1);
   assert.equal(store.countMessages("-1001"), 1);
   const [legacyStats] = store.getEmbeddingStats("-1001");
@@ -203,6 +203,100 @@ test("version 5 fixture without send tables migrates send audit schema", (t) => 
     assertSqliteObject(inspect, "index", "idx_send_outbox_chat_status");
     assertSqliteObject(inspect, "index", "idx_send_outbox_user_status");
     assertSqliteObject(inspect, "table", "message_embedding_chunk_messages");
+    assertSqliteObject(inspect, "table", "schema_object_versions");
+    assertSqliteObject(inspect, "table", "maintenance_jobs");
+  } finally {
+    inspect.close();
+  }
+});
+
+test("stale managed FTS and trigger definitions are repaired", (t) => {
+  const dbPath = tempDbPath(t);
+  const initial = new MessageStore(dbPath);
+  initial.upsertMessages(
+    { chatId: "-1001", requested: "-1001", kind: "Fake" },
+    [{ chatId: "-1001", messageId: 1, senderName: "alice", text: "historical repaired search" }],
+  );
+
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    DROP TRIGGER IF EXISTS messages_ai;
+    DROP TRIGGER IF EXISTS messages_ad;
+    DROP TRIGGER IF EXISTS messages_au;
+    DROP TABLE IF EXISTS messages_fts;
+    CREATE VIRTUAL TABLE messages_fts USING fts5(
+      text,
+      content='messages',
+      content_rowid='id'
+    );
+    CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+      SELECT 1;
+    END;
+    DELETE FROM schema_object_versions WHERE object_name IN ('messages_fts', 'messages_ai');
+    PRAGMA user_version = 9;
+  `);
+  db.close();
+
+  const repaired = new MessageStore(dbPath);
+  assert.equal(repaired.getSchemaVersion(), 10);
+  assert.equal(repaired.search({ chatId: "-1001", query: "repaired", limit: 10 })[0]?.messageId, 1);
+  repaired.upsertMessages(
+    { chatId: "-1001", requested: "-1001", kind: "Fake" },
+    [{ chatId: "-1001", messageId: 2, senderName: "bob", text: "trigger definition repaired too" }],
+  );
+  assert.equal(repaired.search({ chatId: "-1001", query: "trigger", limit: 10 })[0]?.messageId, 2);
+
+  const inspect = new DatabaseSync(dbPath);
+  try {
+    const ftsVersion = inspect
+      .prepare("SELECT object_version FROM schema_object_versions WHERE object_name = 'messages_fts'")
+      .get() as Record<string, unknown> | undefined;
+    const triggerSql = inspect
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'messages_ai'")
+      .get() as Record<string, unknown> | undefined;
+    assert.equal(Number(ftsVersion?.object_version ?? 0), 1);
+    assert.match(String(triggerSql?.sql ?? ""), /INSERT INTO messages_fts/);
+    assert.doesNotMatch(String(triggerSql?.sql ?? ""), /SELECT 1/);
+  } finally {
+    inspect.close();
+  }
+});
+
+test("large embedding membership migration is deferred with maintenance status", (t) => {
+  const dbPath = tempDbPath(t);
+  new MessageStore(dbPath);
+
+  const db = new DatabaseSync(dbPath);
+  const insertChunk = db.prepare(
+    `INSERT INTO message_embedding_chunks (
+       chat_id, start_message_id, end_message_id, message_count, text,
+       embedding_namespace, embedding_model, embedding_dimensions, embedding, content_hash, dirty_at, updated_at
+     )
+     VALUES ('-1001', ?, ?, 1, 'chunk text', 'legacy', 'legacy-model', 2, zeroblob(8), ?, NULL, datetime('now'))`,
+  );
+  for (let id = 1; id <= 1001; id += 1) {
+    insertChunk.run(id, id, `legacy-hash-${id}`);
+  }
+  db.exec(`
+    DELETE FROM message_embedding_chunk_messages;
+    DELETE FROM maintenance_jobs;
+    PRAGMA user_version = 5;
+  `);
+  db.close();
+
+  const migrated = new MessageStore(dbPath);
+  assert.equal(migrated.getSchemaVersion(), 10);
+  const job = migrated.getMaintenanceJobs().find((item) => item.name === "embedding_chunk_membership_backfill");
+  assert.equal(job?.status, "pending");
+  assert.equal(job?.details?.chunkCount, 1001);
+  assert.equal(migrated.getChatStatus("-1001").maintenance.some((item) => item.name === job?.name), true);
+
+  const inspect = new DatabaseSync(dbPath);
+  try {
+    const membershipCount = inspect
+      .prepare("SELECT COUNT(*) AS count FROM message_embedding_chunk_messages")
+      .get() as Record<string, unknown>;
+    assert.equal(Number(membershipCount.count ?? 0), 0);
   } finally {
     inspect.close();
   }

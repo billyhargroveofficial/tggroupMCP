@@ -1,4 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { createHash } from "node:crypto";
 import type { EmbeddingChunkVector } from "./embeddings.js";
 import { ToolError } from "./errors.js";
 import type { ChatInfo } from "./telegram-client.js";
@@ -6,8 +7,54 @@ import type { ChatInfo } from "./telegram-client.js";
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
 const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 const LEGACY_EMBEDDING_NAMESPACE = "legacy";
+const FTS_REBUILD_INLINE_MESSAGE_LIMIT = 10_000;
+const EMBEDDING_MEMBERSHIP_INLINE_CHUNK_LIMIT = 1_000;
+
+const MESSAGES_FTS_VERSION = 1;
+const MESSAGES_FTS_SQL = `CREATE VIRTUAL TABLE messages_fts USING fts5(
+  text,
+  sender_name,
+  content='messages',
+  content_rowid='id'
+)`;
+
+const MANAGED_TRIGGER_DEFINITIONS = [
+  {
+    name: "messages_ai",
+    version: 1,
+    sql: `CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+      INSERT INTO messages_fts(rowid, text, sender_name)
+      VALUES (new.id, new.text, new.sender_name);
+    END`,
+  },
+  {
+    name: "messages_ad",
+    version: 1,
+    sql: `CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, text, sender_name)
+      VALUES ('delete', old.id, old.text, old.sender_name);
+    END`,
+  },
+  {
+    name: "messages_au",
+    version: 1,
+    sql: `CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, text, sender_name)
+      VALUES ('delete', old.id, old.text, old.sender_name);
+      INSERT INTO messages_fts(rowid, text, sender_name)
+      VALUES (new.id, new.text, new.sender_name);
+    END`,
+  },
+  {
+    name: "embedding_chunks_ad",
+    version: 1,
+    sql: `CREATE TRIGGER embedding_chunks_ad AFTER DELETE ON message_embedding_chunks BEGIN
+      DELETE FROM message_embedding_chunk_messages WHERE chunk_id = old.id;
+    END`,
+  },
+] as const;
 
 export type StoredMessage = {
   id?: number;
@@ -59,6 +106,18 @@ export type ChatCacheStatus = {
   syncState: SyncState | null;
   daemonStatus: DaemonStatus | null;
   embeddings: Array<Record<string, unknown>>;
+  maintenance: MaintenanceJob[];
+};
+
+export type MaintenanceJobStatus = "pending" | "completed";
+
+export type MaintenanceJob = {
+  name: string;
+  status: MaintenanceJobStatus;
+  reason?: string;
+  details?: Record<string, unknown>;
+  updatedAt?: string;
+  completedAt?: string;
 };
 
 export type KeywordSearchHit = {
@@ -1177,6 +1236,13 @@ export class MessageStore {
     return row == null ? undefined : rowToDaemonStatus(row);
   }
 
+  getMaintenanceJobs(): MaintenanceJob[] {
+    const rows = this.db
+      .prepare("SELECT * FROM maintenance_jobs ORDER BY status DESC, name ASC")
+      .all() as Record<string, unknown>[];
+    return rows.map(rowToMaintenanceJob);
+  }
+
   getChatStatus(chatId: string): ChatCacheStatus {
     const messageStats = this.db
       .prepare(
@@ -1194,6 +1260,7 @@ export class MessageStore {
       syncState: this.getSyncState(chatId) ?? null,
       daemonStatus: this.getDaemonStatus() ?? null,
       embeddings: this.getEmbeddingStats(chatId),
+      maintenance: this.getMaintenanceJobs(),
     };
   }
 
@@ -1207,7 +1274,13 @@ export class MessageStore {
     const syncState =
       (this.db.prepare("SELECT * FROM sync_state WHERE chat_id = ?").get(chatId) as Record<string, unknown> | undefined) ??
       {};
-    return { ...messageStats, syncState, daemonStatus: this.getDaemonStatus(), embeddings: this.getEmbeddingStats(chatId) };
+    return {
+      ...messageStats,
+      syncState,
+      daemonStatus: this.getDaemonStatus(),
+      embeddings: this.getEmbeddingStats(chatId),
+      maintenance: this.getMaintenanceJobs(),
+    };
   }
 
   private assertSendThrottleAvailable(params: {
@@ -1391,6 +1464,10 @@ export class MessageStore {
         this.applyEmbeddingNamespaceMigration();
         this.db.exec("PRAGMA user_version = 9");
       }
+      if (currentVersion < 10) {
+        this.applyManagedSqlObjectVersionMigration();
+        this.db.exec("PRAGMA user_version = 10");
+      }
       this.validateSchema();
     });
   }
@@ -1564,6 +1641,7 @@ export class MessageStore {
       CREATE INDEX IF NOT EXISTS idx_chat_aliases_chat_id
         ON chat_aliases(chat_id);
     `);
+    this.applyMaintenanceSchema();
     this.ensureColumn("sync_state", "next_backfill_offset_id", "INTEGER");
     this.ensureColumn("sync_state", "recent_catchup_min_id", "INTEGER");
     this.ensureColumn("sync_state", "recent_catchup_next_offset_id", "INTEGER");
@@ -1581,6 +1659,27 @@ export class MessageStore {
     this.ensureColumn("messages", "deleted_at", "TEXT");
     this.ensureColumn("messages", "updated_at", "TEXT");
     this.ensureColumn("message_embedding_chunks", "dirty_at", "TEXT");
+  }
+
+  private applyMaintenanceSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_object_versions (
+        object_name TEXT PRIMARY KEY,
+        object_type TEXT NOT NULL,
+        object_version INTEGER NOT NULL,
+        object_hash TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS maintenance_jobs (
+        name TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'completed')),
+        reason TEXT,
+        details_json TEXT,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+    `);
   }
 
   private applyBackfillExhaustedMigration(): void {
@@ -1623,6 +1722,7 @@ export class MessageStore {
   }
 
   private applyEmbeddingChunkMembershipMigration(): void {
+    this.applyMaintenanceSchema();
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS message_embedding_chunk_messages (
         chunk_id INTEGER NOT NULL,
@@ -1639,6 +1739,20 @@ export class MessageStore {
         DELETE FROM message_embedding_chunk_messages WHERE chunk_id = old.id;
       END;
     `);
+    const chunkCount = this.countRows("message_embedding_chunks");
+    if (chunkCount > EMBEDDING_MEMBERSHIP_INLINE_CHUNK_LIMIT) {
+      this.upsertMaintenanceJob(
+        "embedding_chunk_membership_backfill",
+        "pending",
+        "Embedding chunk membership backfill is too large for startup migration.",
+        {
+          chunkCount,
+          inlineLimit: EMBEDDING_MEMBERSHIP_INLINE_CHUNK_LIMIT,
+          remediation: "Keep vector search disabled or run a bounded maintenance backfill before relying on vector chunk membership coverage.",
+        },
+      );
+      return;
+    }
     const chunks = this.db
       .prepare(
         `SELECT id, chat_id, start_message_id, end_message_id, message_count
@@ -1757,6 +1871,75 @@ export class MessageStore {
     `);
   }
 
+  private applyManagedSqlObjectVersionMigration(): void {
+    this.applyMaintenanceSchema();
+    this.ensureMessagesFtsDefinition();
+    for (const definition of MANAGED_TRIGGER_DEFINITIONS) {
+      this.ensureManagedTriggerDefinition(definition);
+    }
+  }
+
+  private ensureMessagesFtsDefinition(): void {
+    const existing = this.sqliteObjectSql("table", "messages_fts");
+    const needsRepair = existing == null || normalizeSql(existing) !== normalizeSql(MESSAGES_FTS_SQL);
+    if (needsRepair) {
+      this.dropMessagesFtsObjects();
+      this.db.exec(MESSAGES_FTS_SQL);
+      this.maybeRebuildMessagesFts("messages_fts definition was missing or stale.");
+    }
+    this.recordSchemaObjectVersion("messages_fts", "table", MESSAGES_FTS_VERSION, MESSAGES_FTS_SQL);
+  }
+
+  private ensureManagedTriggerDefinition(definition: (typeof MANAGED_TRIGGER_DEFINITIONS)[number]): void {
+    const existing = this.sqliteObjectSql("trigger", definition.name);
+    const needsRepair = existing == null || normalizeSql(existing) !== normalizeSql(definition.sql);
+    if (needsRepair) {
+      this.db.exec(`DROP TRIGGER IF EXISTS ${definition.name}`);
+      this.db.exec(definition.sql);
+    }
+    this.recordSchemaObjectVersion(definition.name, "trigger", definition.version, definition.sql);
+  }
+
+  private dropMessagesFtsObjects(): void {
+    this.db.exec(`
+      DROP TRIGGER IF EXISTS messages_ai;
+      DROP TRIGGER IF EXISTS messages_ad;
+      DROP TRIGGER IF EXISTS messages_au;
+      DROP TABLE IF EXISTS messages_fts;
+    `);
+  }
+
+  private maybeRebuildMessagesFts(reason: string): void {
+    const messageCount = this.countRows("messages");
+    if (messageCount > FTS_REBUILD_INLINE_MESSAGE_LIMIT) {
+      this.upsertMaintenanceJob("messages_fts_rebuild", "pending", reason, {
+        messageCount,
+        inlineLimit: FTS_REBUILD_INLINE_MESSAGE_LIMIT,
+        remediation: "Run a bounded maintenance rebuild before relying on keyword search coverage.",
+      });
+      return;
+    }
+    this.rebuildMessagesFts();
+    this.upsertMaintenanceJob("messages_fts_rebuild", "completed", reason, {
+      messageCount,
+      inlineLimit: FTS_REBUILD_INLINE_MESSAGE_LIMIT,
+    });
+  }
+
+  private recordSchemaObjectVersion(name: string, type: "table" | "trigger", version: number, sql: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO schema_object_versions (object_name, object_type, object_version, object_hash, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(object_name) DO UPDATE SET
+           object_type = excluded.object_type,
+           object_version = excluded.object_version,
+           object_hash = excluded.object_hash,
+           updated_at = excluded.updated_at`,
+      )
+      .run(name, type, version, hashSql(sql));
+  }
+
   private ensureColumn(table: string, column: string, definition: string): void {
     if (!this.hasColumn(table, column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -1782,6 +1965,8 @@ export class MessageStore {
       "daemon_status",
       "send_outbox",
       "send_throttle_state",
+      "schema_object_versions",
+      "maintenance_jobs",
       "message_embedding_chunks",
       "message_embedding_chunk_messages",
       "messages_fts",
@@ -1834,6 +2019,21 @@ export class MessageStore {
       "consecutive_failures",
       "updated_at",
     ]);
+    this.assertColumns("schema_object_versions", [
+      "object_name",
+      "object_type",
+      "object_version",
+      "object_hash",
+      "updated_at",
+    ]);
+    this.assertColumns("maintenance_jobs", [
+      "name",
+      "status",
+      "reason",
+      "details_json",
+      "updated_at",
+      "completed_at",
+    ]);
     this.assertColumns("sync_state", [
       "chat_id",
       "oldest_message_id",
@@ -1869,6 +2069,38 @@ export class MessageStore {
         throw new Error(`Database schema validation failed: ${table} missing required column ${column}.`);
       }
     }
+  }
+
+  private sqliteObjectSql(type: "table" | "trigger", name: string): string | undefined {
+    const row = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = ? AND name = ?").get(type, name) as
+      | Record<string, unknown>
+      | undefined;
+    return typeof row?.sql === "string" ? row.sql : undefined;
+  }
+
+  private countRows(table: string): number {
+    const row = this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as Record<string, unknown>;
+    return Number(row.count ?? 0);
+  }
+
+  private upsertMaintenanceJob(
+    name: string,
+    status: MaintenanceJobStatus,
+    reason: string,
+    details: Record<string, unknown>,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO maintenance_jobs (name, status, reason, details_json, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, datetime('now'), CASE WHEN ? = 'completed' THEN datetime('now') ELSE NULL END)
+         ON CONFLICT(name) DO UPDATE SET
+           status = excluded.status,
+           reason = excluded.reason,
+           details_json = excluded.details_json,
+           updated_at = excluded.updated_at,
+           completed_at = excluded.completed_at`,
+      )
+      .run(name, status, reason, JSON.stringify(details), status);
   }
 
   private getMessageForDirtyCheck(chatId: string, messageId: number): { text: string; deletedAt: string | null } | undefined {
@@ -2037,6 +2269,28 @@ function rowToDaemonStatus(row: Record<string, unknown>): DaemonStatus {
   };
 }
 
+function rowToMaintenanceJob(row: Record<string, unknown>): MaintenanceJob {
+  let details: Record<string, unknown> | undefined;
+  if (typeof row.details_json === "string" && row.details_json.trim() !== "") {
+    try {
+      const parsed = JSON.parse(row.details_json) as unknown;
+      if (parsed != null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        details = parsed as Record<string, unknown>;
+      }
+    } catch {
+      details = { parse_error: "invalid details_json" };
+    }
+  }
+  return {
+    name: String(row.name),
+    status: String(row.status) as MaintenanceJobStatus,
+    reason: row.reason == null ? undefined : String(row.reason),
+    details,
+    updatedAt: row.updated_at == null ? undefined : String(row.updated_at),
+    completedAt: row.completed_at == null ? undefined : String(row.completed_at),
+  };
+}
+
 function rowToEmbeddingChunk(row: Record<string, unknown>): StoredEmbeddingChunk {
   return {
     id: Number(row.id),
@@ -2094,6 +2348,14 @@ function escapeFtsQuery(query: string): string {
 
 function toSqlValues(values: unknown[]): SQLInputValue[] {
   return values as SQLInputValue[];
+}
+
+function normalizeSql(sql: string): string {
+  return sql.replace(/\s+/g, " ").replace(/;$/, "").trim().toLowerCase();
+}
+
+function hashSql(sql: string): string {
+  return createHash("sha256").update(normalizeSql(sql)).digest("hex");
 }
 
 function countMessageIdRanges(ids: number[]): number {
