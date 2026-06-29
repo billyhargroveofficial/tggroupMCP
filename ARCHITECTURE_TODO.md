@@ -12,6 +12,14 @@ Current posture:
 
 ### 1. Add server-side live-send approval
 
+Status 2026-06-29: Completed in code and no-network tests. `TELEGRAM_DRY_RUN_DEFAULT=true` is now a hard server-side dry-run gate, `preview_message` returns a short-lived `approval_id`, and live `send_message` / `reply_to_message` require a matching unexpired approval unless the explicit admin break-glass flag `TELEGRAM_LIVE_SEND_APPROVAL_BYPASS=true` is set. Approval matching is bound to chat id, text hash, reply id, parse mode, link preview, and silent flag, and approved live sends consume the token before reaching the send path.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+- `npm run print-config`
+
 Problem:
 `send_message` can post live when `TELEGRAM_SEND_ENABLED=true` and `dryRunDefault=false`. Safety is mostly in skill instructions, not enforced by the MCP server. `TELEGRAM_DRY_RUN_DEFAULT=true` is also only a default, because a caller can pass `dry_run:false`.
 

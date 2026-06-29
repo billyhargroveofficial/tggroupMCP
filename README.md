@@ -54,4 +54,7 @@ MCP config example:
 command = "/root/telegram-parilka-mcp/bin/telegram-parilka-mcp"
 ```
 
-Sending is live by default. Set `TELEGRAM_SEND_ENABLED=false` or pass `dry_run: true` to preview without posting.
+Sending requires a server-issued approval for live posts. Call `preview_message` first, then pass the returned
+`approval_id` to `send_message` or `reply_to_message` with the exact same chat, text, reply id, parse mode, link
+preview, and silent options. Set `TELEGRAM_DRY_RUN_DEFAULT=true` or `TELEGRAM_SEND_ENABLED=false` to force every send
+tool call into hard dry-run mode; callers cannot override that with `dry_run:false`.

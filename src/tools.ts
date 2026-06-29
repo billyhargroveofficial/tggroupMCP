@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createHash, randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { fail, ok, ToolError } from "./errors.js";
 import { stringify } from "./json.js";
@@ -27,6 +28,7 @@ export class TelegramTools {
   private readonly throttler: SendThrottler;
   private readonly syncer: HistorySyncer;
   private readonly vectorRag: VectorRag;
+  private readonly approvals: SendApprovalRegistry;
 
   constructor(
     private readonly config: AppConfig,
@@ -36,6 +38,7 @@ export class TelegramTools {
     this.throttler = new SendThrottler(config);
     this.syncer = new HistorySyncer(config, telegram, store);
     this.vectorRag = new VectorRag(config, store);
+    this.approvals = new SendApprovalRegistry(config.safety.liveSendApprovalTtlMs);
   }
 
   listTools(): ToolDef[] {
@@ -131,17 +134,19 @@ export class TelegramTools {
       },
       {
         name: "preview_message",
-        description: "Validate a Telegram send without sending anything.",
+        description: "Validate a Telegram send without sending anything and return a short-lived live-send approval id.",
         inputSchema: objectSchema({
           chat: stringProp("Chat ID, @username, or omitted for TELEGRAM_DEFAULT_CHAT_ID."),
           text: stringProp("Message text."),
           parse_mode: enumProp(["none", "html", "markdown"], "Client-side parse mode."),
           reply_to_message_id: numberProp("Message ID to reply to.", 1),
+          link_preview: boolProp("Enable link preview."),
+          silent: boolProp("Send silently."),
         }, ["text"]),
       },
       {
         name: "send_message",
-        description: "Send or dry-run a Telegram message with allowlist, dedupe, and throttling.",
+        description: "Send or dry-run a Telegram message with allowlist, approval, dedupe, and throttling.",
         inputSchema: objectSchema({
           chat: stringProp("Chat ID, @username, or omitted for TELEGRAM_DEFAULT_CHAT_ID."),
           text: stringProp("Message text."),
@@ -150,6 +155,7 @@ export class TelegramTools {
           link_preview: boolProp("Enable link preview."),
           silent: boolProp("Send silently."),
           dry_run: boolProp("Force dry run."),
+          approval_id: stringProp("Short-lived approval id returned by preview_message; required for live sends unless admin bypass is enabled."),
           dedupe_key: stringProp("Optional caller-provided idempotency key."),
           user_key: stringProp("Logical user key for cooldown. Default mcp-agent."),
         }, ["text"]),
@@ -162,7 +168,10 @@ export class TelegramTools {
           message_id: numberProp("Message ID to reply to.", 1),
           text: stringProp("Reply text."),
           parse_mode: enumProp(["none", "html", "markdown"], "Client-side parse mode. Default none."),
+          link_preview: boolProp("Enable link preview."),
+          silent: boolProp("Send silently."),
           dry_run: boolProp("Force dry run."),
+          approval_id: stringProp("Short-lived approval id returned by preview_message; required for live sends unless admin bypass is enabled."),
           dedupe_key: stringProp("Optional caller-provided idempotency key."),
           user_key: stringProp("Logical user key for cooldown. Default mcp-agent."),
         }, ["message_id", "text"]),
@@ -211,6 +220,8 @@ export class TelegramTools {
       allowedChatIds: this.config.telegram.allowedChatIds,
       sendEnabled: this.config.safety.sendEnabled,
       dryRunDefault: this.config.safety.dryRunDefault,
+      liveSendApprovalTtlMs: this.config.safety.liveSendApprovalTtlMs,
+      liveSendApprovalBypass: this.config.safety.liveSendApprovalBypass,
       dbPath: this.config.storage.dbPath,
       isTelegramConfigured: this.telegram.isConfigured,
       sync: this.config.sync,
@@ -420,17 +431,33 @@ export class TelegramTools {
         text: z.string().min(1),
         parse_mode: z.enum(["none", "html", "markdown"]).default("none"),
         reply_to_message_id: z.number().int().positive().optional(),
+        link_preview: z.boolean().optional(),
+        silent: z.boolean().optional(),
       })
       .parse(rawArgs ?? {});
     const resolved = await this.telegram.resolveChat(args.chat);
     const warnings = validateSendText(args.text, this.config.safety.maxSendChars);
+    const approval = this.approvals.create(
+      approvalPayload({
+        chatId: resolved.info.chatId,
+        text: args.text,
+        parseMode: args.parse_mode,
+        replyToMessageId: args.reply_to_message_id,
+        linkPreview: args.link_preview,
+        silent: args.silent,
+      }),
+    );
     return ok({
       dry_run: true,
       chat: resolved.info,
+      approval_id: approval.id,
+      approval_expires_at: new Date(approval.expiresAt).toISOString(),
       text_chars: args.text.length,
       utf8_bytes: Buffer.byteLength(args.text, "utf8"),
       parse_mode: args.parse_mode,
       reply_to_message_id: args.reply_to_message_id,
+      link_preview: args.link_preview,
+      silent: args.silent,
       warnings,
     });
   }
@@ -444,6 +471,7 @@ export class TelegramTools {
         link_preview: z.boolean().optional(),
         silent: z.boolean().optional(),
         dry_run: z.boolean().optional(),
+        approval_id: z.string().optional(),
         dedupe_key: z.string().optional(),
         user_key: z.string().default("mcp-agent"),
       })
@@ -455,10 +483,12 @@ export class TelegramTools {
       throw new ToolError({ category: "formatting", retryable: false, message: warnings.map((w) => w.message).join("; ") });
     }
 
-    const dryRun = args.dry_run ?? this.config.safety.dryRunDefault ?? !this.config.safety.sendEnabled;
-    if (dryRun || !this.config.safety.sendEnabled) {
+    const hardDryRun = this.config.safety.dryRunDefault || !this.config.safety.sendEnabled;
+    const dryRun = hardDryRun || args.dry_run === true;
+    if (dryRun) {
       return ok({
         dry_run: true,
+        hard_dry_run: hardDryRun,
         send_enabled: this.config.safety.sendEnabled,
         chat: resolved.info,
         reply_to_message_id: args.reply_to_message_id,
@@ -466,6 +496,20 @@ export class TelegramTools {
         utf8_bytes: Buffer.byteLength(args.text, "utf8"),
         warnings,
       });
+    }
+
+    if (!this.config.safety.liveSendApprovalBypass) {
+      this.approvals.consume(
+        args.approval_id,
+        approvalPayload({
+          chatId: resolved.info.chatId,
+          text: args.text,
+          parseMode: args.parse_mode,
+          replyToMessageId: args.reply_to_message_id,
+          linkPreview: args.link_preview,
+          silent: args.silent,
+        }),
+      );
     }
 
     this.throttler.dedupe(args.dedupe_key);
@@ -491,7 +535,10 @@ export class TelegramTools {
         message_id: z.number().int().positive(),
         text: z.string().min(1),
         parse_mode: z.enum(["none", "html", "markdown"]).default("none"),
+        link_preview: z.boolean().optional(),
+        silent: z.boolean().optional(),
         dry_run: z.boolean().optional(),
+        approval_id: z.string().optional(),
         dedupe_key: z.string().optional(),
         user_key: z.string().default("mcp-agent"),
       })
@@ -501,7 +548,10 @@ export class TelegramTools {
       text: args.text,
       parse_mode: args.parse_mode,
       reply_to_message_id: args.message_id,
+      link_preview: args.link_preview,
+      silent: args.silent,
       dry_run: args.dry_run,
+      approval_id: args.approval_id,
       dedupe_key: args.dedupe_key,
       user_key: args.user_key,
     });
@@ -540,6 +590,103 @@ function validateSendText(text: string, maxChars: number): Array<{ severity: "wa
     warnings.push({ severity: "warning", message: "Telegram Markdown can render ** literally; prefer parse_mode html." });
   }
   return warnings;
+}
+
+type SendApprovalPayload = {
+  chatId: string;
+  textHash: string;
+  replyToMessageId: number | null;
+  parseMode: "none" | "html" | "markdown";
+  linkPreview: boolean | null;
+  silent: boolean | null;
+};
+
+type SendApproval = SendApprovalPayload & {
+  id: string;
+  expiresAt: number;
+};
+
+class SendApprovalRegistry {
+  private readonly approvals = new Map<string, SendApproval>();
+
+  constructor(private readonly ttlMs: number) {}
+
+  create(payload: SendApprovalPayload): SendApproval {
+    const now = Date.now();
+    this.gc(now);
+    const approval = {
+      ...payload,
+      id: randomUUID(),
+      expiresAt: now + this.ttlMs,
+    };
+    this.approvals.set(approval.id, approval);
+    return approval;
+  }
+
+  consume(id: string | undefined, payload: SendApprovalPayload): void {
+    const now = Date.now();
+    this.gc(now);
+    if (!id) {
+      throw approvalError("Live send requires approval_id from preview_message.");
+    }
+    const approval = this.approvals.get(id);
+    if (!approval) {
+      throw approvalError("Live send approval was not found, expired, or already consumed.");
+    }
+    if (approval.expiresAt <= now) {
+      this.approvals.delete(id);
+      throw approvalError("Live send approval expired. Preview the message again.");
+    }
+    if (!sameApprovalPayload(approval, payload)) {
+      throw approvalError("Live send approval does not match chat, text, reply, parse mode, link preview, or silent flag.");
+    }
+    this.approvals.delete(id);
+  }
+
+  private gc(now: number): void {
+    for (const [id, approval] of this.approvals) {
+      if (approval.expiresAt <= now) {
+        this.approvals.delete(id);
+      }
+    }
+  }
+}
+
+function approvalPayload(params: {
+  chatId: string;
+  text: string;
+  replyToMessageId?: number;
+  parseMode: "none" | "html" | "markdown";
+  linkPreview?: boolean;
+  silent?: boolean;
+}): SendApprovalPayload {
+  return {
+    chatId: params.chatId,
+    textHash: createHash("sha256").update(params.text, "utf8").digest("hex"),
+    replyToMessageId: params.replyToMessageId ?? null,
+    parseMode: params.parseMode,
+    linkPreview: params.linkPreview ?? null,
+    silent: params.silent ?? null,
+  };
+}
+
+function sameApprovalPayload(left: SendApprovalPayload, right: SendApprovalPayload): boolean {
+  return (
+    left.chatId === right.chatId &&
+    left.textHash === right.textHash &&
+    left.replyToMessageId === right.replyToMessageId &&
+    left.parseMode === right.parseMode &&
+    left.linkPreview === right.linkPreview &&
+    left.silent === right.silent
+  );
+}
+
+function approvalError(message: string): ToolError {
+  return new ToolError({
+    category: "permission",
+    retryable: false,
+    message,
+  });
 }
 
 function objectSchema(properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> {

@@ -73,6 +73,8 @@ export type AppConfig = {
     sendEnabled: boolean;
     dryRunDefault: boolean;
     maxSendChars: number;
+    liveSendApprovalTtlMs: number;
+    liveSendApprovalBypass: boolean;
   };
   sync: {
     batchSize: number;
@@ -146,6 +148,8 @@ export function loadConfig(): AppConfig {
       sendEnabled: boolFromEnv("TELEGRAM_SEND_ENABLED", true),
       dryRunDefault: boolFromEnv("TELEGRAM_DRY_RUN_DEFAULT", false),
       maxSendChars: intFromEnv("TELEGRAM_MAX_SEND_CHARS", 4096),
+      liveSendApprovalTtlMs: intFromEnv("TELEGRAM_LIVE_SEND_APPROVAL_TTL_MS", 5 * 60_000),
+      liveSendApprovalBypass: boolFromEnv("TELEGRAM_LIVE_SEND_APPROVAL_BYPASS", false),
     },
     sync: {
       batchSize: intFromEnv("TELEGRAM_HISTORY_BATCH_SIZE", 100),
