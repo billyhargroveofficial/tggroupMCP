@@ -107,35 +107,85 @@ export class HistorySyncer {
 
     try {
       if (target > 0) {
-        const stream = await this.telegram.iterateMessages({
-          chat: chat.chatId,
-          limit: target,
-          offsetId,
-          minId,
-        });
+        if (params.mode === "recent") {
+          let pageOffsetId = offsetId;
+          while (true) {
+            const stream = await this.telegram.iterateMessages({
+              chat: chat.chatId,
+              limit: target,
+              offsetId: pageOffsetId,
+              minId,
+            });
+            let pageFetched = 0;
+            let pageOldestMessageId: number | undefined;
 
-        for await (const message of stream.messages) {
-          fetched += 1;
-          const row = gramMessageToStored(stream.chat, message);
-          if (!row) {
-            continue;
-          }
+            for await (const message of stream.messages) {
+              fetched += 1;
+              pageFetched += 1;
+              const row = gramMessageToStored(stream.chat, message);
+              if (!row) {
+                continue;
+              }
 
-          const key = `${row.chatId}:${row.messageId}`;
-          if (seen.has(key)) {
-            continue;
-          }
-          seen.add(key);
-          rows.push(row);
+              const key = `${row.chatId}:${row.messageId}`;
+              if (seen.has(key)) {
+                continue;
+              }
+              seen.add(key);
+              rows.push(row);
 
-          oldestMessageId = oldestMessageId == null ? row.messageId : Math.min(oldestMessageId, row.messageId);
-          newestMessageId = newestMessageId == null ? row.messageId : Math.max(newestMessageId, row.messageId);
+              oldestMessageId = oldestMessageId == null ? row.messageId : Math.min(oldestMessageId, row.messageId);
+              newestMessageId = newestMessageId == null ? row.messageId : Math.max(newestMessageId, row.messageId);
+              pageOldestMessageId =
+                pageOldestMessageId == null ? row.messageId : Math.min(pageOldestMessageId, row.messageId);
 
-          if (rows.length >= batchSize) {
+              if (rows.length >= batchSize) {
+                flushRows();
+              }
+            }
             flushRows();
+
+            if (pageFetched < target || pageOldestMessageId == null) {
+              break;
+            }
+            if (fetched >= this.config.sync.maxSyncLimit) {
+              throw new Error(
+                "Recent sync reached TELEGRAM_MAX_SYNC_LIMIT before confirming contiguous catch-up; state was not advanced.",
+              );
+            }
+            pageOffsetId = pageOldestMessageId;
           }
+        } else {
+          const stream = await this.telegram.iterateMessages({
+            chat: chat.chatId,
+            limit: target,
+            offsetId,
+            minId,
+          });
+
+          for await (const message of stream.messages) {
+            fetched += 1;
+            const row = gramMessageToStored(stream.chat, message);
+            if (!row) {
+              continue;
+            }
+
+            const key = `${row.chatId}:${row.messageId}`;
+            if (seen.has(key)) {
+              continue;
+            }
+            seen.add(key);
+            rows.push(row);
+
+            oldestMessageId = oldestMessageId == null ? row.messageId : Math.min(oldestMessageId, row.messageId);
+            newestMessageId = newestMessageId == null ? row.messageId : Math.max(newestMessageId, row.messageId);
+
+            if (rows.length >= batchSize) {
+              flushRows();
+            }
+          }
+          flushRows();
         }
-        flushRows();
       }
 
       if (oldestMessageId != null && shouldAdvanceBackfillPointer) {

@@ -88,6 +88,13 @@ Acceptance criteria:
 
 ### 3. Make recent sync contiguous and self-healing
 
+Status 2026-06-29: Completed for recent sync catch-up. Recent sync now treats `newestMessageId` as the contiguous high-water mark, pages above the previous value until Telegram returns a short/empty page, and refuses to advance state if an iterator failure or `TELEGRAM_MAX_SYNC_LIMIT` interruption prevents confirming the contiguous range. Partial rows already flushed to SQLite are harmless: the next recent tick starts from the unchanged high-water mark and upserts the full range again to repair the suspected gap.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+
 Problem:
 Recent sync uses cached `newestMessageId` as `minId`, but still fetches only `recentLimit`. If more messages arrive than the limit during downtime or a burst, the newest page can advance `newestMessageId` and leave an unfilled middle gap.
 
