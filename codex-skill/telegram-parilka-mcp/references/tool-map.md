@@ -9,11 +9,11 @@ Default chat: `-1003179772905` (`Парилка228`). All tools accept optional 
 - `resolve_chat`: resolve and cache a Telegram peer. Use before important actions.
 - `get_chat_info`: resolve chat and return local SQLite cache stats.
 - `sync_history`: backfill history into SQLite. Use bounded pages; the server returns `status`, `chat`, `stats`, and metadata, not a huge message dump.
-- `read_history`: read cached messages by `limit`, `before_id`, `after_id`, and order.
+- `read_history`: read cached messages by `limit`, `before_id`, `after_id`, and order. Includes `applied_filters`, `returned_count`, and `cache` metadata with local range, sync state, and outside/partial-cache relation.
 - `search_messages`: multi-channel cached search; returns keyword FTS hits, vector/cosine chunks when indexed, and hybrid candidates.
 - `semantic_search_messages`: vector/cosine search over indexed cached message chunks.
 - `index_embeddings`: build local SQLite vector chunks from cached messages via the configured embeddings API.
-- `get_thread_context`: cached messages around a message ID.
+- `get_thread_context`: cached messages around a message ID. Includes `center_found`, requested range, returned count, and cache range/completeness metadata.
 
 ## Write Tools
 

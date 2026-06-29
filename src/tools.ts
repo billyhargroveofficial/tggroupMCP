@@ -367,15 +367,30 @@ export class TelegramTools {
       })
       .parse(rawArgs ?? {});
     const chat = this.cacheChat(args.chat);
+    const messages = this.store.getHistory({
+      chatId: chat.chatId,
+      limit: args.limit,
+      beforeId: args.before_id,
+      afterId: args.after_id,
+      order: args.order,
+    });
+    const cacheStatus = this.store.getChatStatus(chat.chatId);
     return ok({
       chat,
-      messages: this.store.getHistory({
-        chatId: chat.chatId,
+      applied_filters: {
         limit: args.limit,
+        before_id: args.before_id,
+        after_id: args.after_id,
+        order: args.order,
+      },
+      returned_count: messages.length,
+      cache: historyCacheMetadata({
+        status: cacheStatus,
         beforeId: args.before_id,
         afterId: args.after_id,
-        order: args.order,
+        returnedCount: messages.length,
       }),
+      messages,
     });
   }
 
@@ -507,15 +522,32 @@ export class TelegramTools {
       })
       .parse(rawArgs ?? {});
     const chat = this.cacheChat(args.chat);
+    const messages = this.store.getThreadContext({
+      chatId: chat.chatId,
+      messageId: args.message_id,
+      before: args.before,
+      after: args.after,
+    });
+    const cacheStatus = this.store.getChatStatus(chat.chatId);
+    const centerFound = messages.some((message) => message.messageId === args.message_id);
     return ok({
       chat,
       center_message_id: args.message_id,
-      messages: this.store.getThreadContext({
-        chatId: chat.chatId,
+      center_found: centerFound,
+      requested_range: {
+        start_message_id: Math.max(1, args.message_id - args.before),
+        end_message_id: args.message_id + args.after,
+        before: args.before,
+        after: args.after,
+      },
+      returned_count: messages.length,
+      cache: contextCacheMetadata({
+        status: cacheStatus,
         messageId: args.message_id,
         before: args.before,
         after: args.after,
       }),
+      messages,
     });
   }
 
@@ -924,4 +956,137 @@ function parseTimestampMs(timestamp: string | undefined): number | undefined {
   const normalized = timestamp.includes("T") ? timestamp : `${timestamp.replace(" ", "T")}Z`;
   const parsed = Date.parse(normalized);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function historyCacheMetadata(params: {
+  status: ChatCacheStatus;
+  beforeId?: number;
+  afterId?: number;
+  returnedCount: number;
+}): Record<string, unknown> {
+  const relation = historyCacheRelation(params);
+  return {
+    range: cacheRange(params.status),
+    sync_state: params.status.syncState,
+    returned_count: params.returnedCount,
+    relation,
+    empty_reason: params.returnedCount === 0 ? emptyReason(relation) : undefined,
+  };
+}
+
+function contextCacheMetadata(params: {
+  status: ChatCacheStatus;
+  messageId: number;
+  before: number;
+  after: number;
+}): Record<string, unknown> {
+  const startMessageId = Math.max(1, params.messageId - params.before);
+  const endMessageId = params.messageId + params.after;
+  const relation = contextCacheRelation(params.status, startMessageId, endMessageId);
+  return {
+    range: cacheRange(params.status),
+    sync_state: params.status.syncState,
+    requested_range: {
+      start_message_id: startMessageId,
+      end_message_id: endMessageId,
+    },
+    relation,
+    empty_reason: emptyReason(relation),
+  };
+}
+
+function cacheRange(status: ChatCacheStatus): Record<string, unknown> {
+  return {
+    message_count: status.messages.count,
+    oldest_message_id: status.messages.oldestMessageId,
+    newest_message_id: status.messages.newestMessageId,
+  };
+}
+
+function historyCacheRelation(params: {
+  status: ChatCacheStatus;
+  beforeId?: number;
+  afterId?: number;
+}): Record<string, unknown> {
+  const range = params.status.messages;
+  if (range.count === 0 || range.oldestMessageId == null || range.newestMessageId == null) {
+    return {
+      completeness: "empty_cache",
+      outside_cached_range: true,
+      partial_cached_range: false,
+      requested_before_cached_range: false,
+      requested_after_cached_range: false,
+    };
+  }
+  const impossibleRange = params.beforeId != null && params.afterId != null && params.afterId >= params.beforeId;
+  const requestedBeforeCachedRange = params.beforeId != null && params.beforeId <= range.oldestMessageId;
+  const requestedAfterCachedRange = params.afterId != null && params.afterId >= range.newestMessageId;
+  const mayOmitOlderMessages = params.afterId != null && params.afterId < range.oldestMessageId;
+  const mayOmitNewerMessages = params.beforeId != null && params.beforeId > range.newestMessageId;
+  const outsideCachedRange = requestedBeforeCachedRange || requestedAfterCachedRange;
+  const partialCachedRange = !outsideCachedRange && (mayOmitOlderMessages || mayOmitNewerMessages);
+  return {
+    completeness: impossibleRange
+      ? "no_matching_message_ids"
+      : outsideCachedRange
+        ? "outside_cached_range"
+        : partialCachedRange
+          ? "partial_cached_range"
+          : "within_cached_range",
+    outside_cached_range: outsideCachedRange,
+    partial_cached_range: partialCachedRange,
+    requested_before_cached_range: requestedBeforeCachedRange,
+    requested_after_cached_range: requestedAfterCachedRange,
+    may_omit_older_messages: mayOmitOlderMessages,
+    may_omit_newer_messages: mayOmitNewerMessages,
+  };
+}
+
+function contextCacheRelation(
+  status: ChatCacheStatus,
+  startMessageId: number,
+  endMessageId: number,
+): Record<string, unknown> {
+  const range = status.messages;
+  if (range.count === 0 || range.oldestMessageId == null || range.newestMessageId == null) {
+    return {
+      completeness: "empty_cache",
+      outside_cached_range: true,
+      partial_cached_range: false,
+      requested_before_cached_range: false,
+      requested_after_cached_range: false,
+    };
+  }
+  const requestedBeforeCachedRange = endMessageId < range.oldestMessageId;
+  const requestedAfterCachedRange = startMessageId > range.newestMessageId;
+  const outsideCachedRange = requestedBeforeCachedRange || requestedAfterCachedRange;
+  const partialCachedRange = !outsideCachedRange && (startMessageId < range.oldestMessageId || endMessageId > range.newestMessageId);
+  return {
+    completeness: outsideCachedRange
+      ? "outside_cached_range"
+      : partialCachedRange
+        ? "partial_cached_range"
+        : "within_cached_range",
+    outside_cached_range: outsideCachedRange,
+    partial_cached_range: partialCachedRange,
+    requested_before_cached_range: requestedBeforeCachedRange,
+    requested_after_cached_range: requestedAfterCachedRange,
+    may_omit_older_messages: !outsideCachedRange && startMessageId < range.oldestMessageId,
+    may_omit_newer_messages: !outsideCachedRange && endMessageId > range.newestMessageId,
+  };
+}
+
+function emptyReason(relation: Record<string, unknown>): string | undefined {
+  switch (relation.completeness) {
+    case "empty_cache":
+      return "cache_empty";
+    case "outside_cached_range":
+      return relation.requested_before_cached_range
+        ? "requested_before_cached_range"
+        : "requested_after_cached_range";
+    case "no_matching_message_ids":
+      return "filters_exclude_all_message_ids";
+    default:
+      return undefined;
+  }
 }

@@ -787,6 +787,16 @@ Acceptance criteria:
 
 ### 25. Add cache completeness metadata to read tools
 
+Status 2026-06-29: Completed. `read_history` now returns additive `applied_filters`, `returned_count`, and `cache` metadata with local cache range, sync state, outside/partial-cache relation flags, and an empty reason when no rows are returned. `get_thread_context` now returns `center_found`, requested range, returned count, and matching cache range/completeness metadata. Tool map docs describe the new fields. Empty windows now distinguish empty cache, filters outside the cached range, impossible ID filters, and no cached rows matching filters; context windows report when requested context may omit older/newer messages outside the local cache.
+
+Verification 2026-06-29:
+
+- `node --test --import tsx tests/tools-response.test.ts --test-reporter=spec` (6 passed)
+- `npm run check`
+- `npm test -- --test-reporter=spec` (63 passed)
+- `npm run secret-scan`
+- `npm run smoke:mcp`
+
 Problem:
 `read_history` and `get_thread_context` can return empty or partial windows without telling the caller whether data is absent or merely not cached.
 

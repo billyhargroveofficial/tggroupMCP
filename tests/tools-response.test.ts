@@ -105,6 +105,81 @@ test("get_status reports cache health without Telegram network calls", async () 
   assert.equal(Array.isArray((result.embeddings as { coverage?: unknown }).coverage), true);
 });
 
+test("read_history reports applied filters and outside cache range", async () => {
+  const store = new MessageStore(":memory:");
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 10, text: "cached ten" },
+    { chatId: CHAT.chatId, messageId: 11, text: "cached eleven" },
+  ]);
+  store.updateSyncState(CHAT, {
+    oldestMessageId: 10,
+    newestMessageId: 11,
+    syncedCount: 2,
+    mode: "recent",
+    error: null,
+  });
+
+  const result = await callTool(makeTools(store), "read_history", {
+    after_id: 99,
+    limit: 5,
+    order: "asc",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.returned_count, 0);
+  assert.deepEqual(result.applied_filters, { limit: 5, after_id: 99, order: "asc" });
+  const cache = result.cache as {
+    range: { message_count: number; newest_message_id: number };
+    relation: { completeness: string; requested_after_cached_range: boolean };
+    empty_reason: string;
+    sync_state: { newestMessageId: number };
+  };
+  assert.equal(cache.range.message_count, 2);
+  assert.equal(cache.range.newest_message_id, 11);
+  assert.equal(cache.relation.completeness, "outside_cached_range");
+  assert.equal(cache.relation.requested_after_cached_range, true);
+  assert.equal(cache.empty_reason, "requested_after_cached_range");
+  assert.equal(cache.sync_state.newestMessageId, 11);
+});
+
+test("get_thread_context reports center_found and partial cache range", async () => {
+  const store = new MessageStore(":memory:");
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 10, text: "cached ten" },
+  ]);
+  store.updateSyncState(CHAT, {
+    oldestMessageId: 10,
+    newestMessageId: 10,
+    syncedCount: 1,
+    mode: "recent",
+    error: null,
+  });
+
+  const result = await callTool(makeTools(store), "get_thread_context", {
+    message_id: 12,
+    before: 2,
+    after: 2,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.center_found, false);
+  assert.equal(result.returned_count, 1);
+  assert.deepEqual(result.requested_range, {
+    start_message_id: 10,
+    end_message_id: 14,
+    before: 2,
+    after: 2,
+  });
+  const cache = result.cache as {
+    relation: { completeness: string; partial_cached_range: boolean; may_omit_newer_messages: boolean };
+    requested_range: { start_message_id: number; end_message_id: number };
+  };
+  assert.equal(cache.relation.completeness, "partial_cached_range");
+  assert.equal(cache.relation.partial_cached_range, true);
+  assert.equal(cache.relation.may_omit_newer_messages, true);
+  assert.deepEqual(cache.requested_range, { start_message_id: 10, end_message_id: 14 });
+});
+
 function makeTools(store = new MessageStore(":memory:")): TelegramTools {
   return new TelegramTools(config(), new FakeTelegram() as unknown as TelegramService, store);
 }
