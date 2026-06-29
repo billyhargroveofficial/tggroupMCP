@@ -48,6 +48,13 @@ Acceptance criteria:
 
 ### 2. Persist send idempotency, audit, and throttling state
 
+Status 2026-06-29: Completed for the MCP send path. `send_outbox` now persists dedupe keys, payload hashes, chat/reply metadata, server-owned caller identity, queued/sending/sent/failed/expired status, Telegram message id, errors, and timestamps. `send_throttle_state` persists cooldown state. Send reservations run in SQLite `BEGIN IMMEDIATE` transactions, duplicate sent dedupe keys return the recorded message id without calling Telegram again, failed/expired rows can be retried with the same payload, and queue/cooldown checks use persisted active rows. Caller-supplied `user_key` is no longer exposed or parsed; the send path uses a server-owned throttle identity.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+
 Problem:
 Send dedupe, cooldown, queue, and pending counts are in memory. Restarts forget them. `dedupe_key` is optional and recorded before enqueue/send succeeds.
 

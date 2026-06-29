@@ -1,5 +1,6 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { EmbeddingChunkVector } from "./embeddings.js";
+import { ToolError } from "./errors.js";
 import type { ChatInfo } from "./telegram-client.js";
 
 export type StoredMessage = {
@@ -45,6 +46,39 @@ export type StoredEmbeddingChunk = {
   contentHash: string;
   updatedAt: string;
 };
+
+export type SendOutboxStatus = "queued" | "sending" | "sent" | "failed" | "expired";
+
+export type StoredSendOutboxItem = {
+  id: string;
+  dedupeKey?: string;
+  payloadHash: string;
+  chatId: string;
+  replyToMessageId?: number;
+  userKey: string;
+  status: SendOutboxStatus;
+  telegramMessageId?: number;
+  error?: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  queuedAtMs?: number;
+  sendingAtMs?: number;
+  sentAtMs?: number;
+  expiresAtMs: number;
+};
+
+export type SendReservation =
+  | {
+      kind: "queued";
+      outboxId: string;
+      expiresAtMs: number;
+    }
+  | {
+      kind: "duplicate_sent";
+      outboxId: string;
+      chatId: string;
+      telegramMessageId?: number;
+    };
 
 export class MessageStore {
   private readonly db: DatabaseSync;
@@ -419,6 +453,148 @@ export class MessageStore {
       .all(chatId) as Record<string, unknown>[];
   }
 
+  reserveSend(params: {
+    outboxId: string;
+    dedupeKey?: string;
+    payloadHash: string;
+    chatId: string;
+    replyToMessageId?: number;
+    userKey: string;
+    nowMs: number;
+    maxAgeMs: number;
+    userCooldownMs: number;
+    maxPendingPerUserPerChat: number;
+    maxQueuePerChat: number;
+  }): SendReservation {
+    const expiresAtMs = params.nowMs + params.maxAgeMs;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.expireStaleSendsLocked(params.nowMs);
+      const existing = params.dedupeKey == null ? undefined : this.getSendByDedupeKeyLocked(params.dedupeKey);
+      if (existing) {
+        if (existing.payloadHash !== params.payloadHash) {
+          throw new ToolError({
+            category: "rate_limit",
+            retryable: false,
+            message: "dedupe_key has already been used for a different send payload.",
+          });
+        }
+        if (existing.status === "sent") {
+          this.db.exec("COMMIT");
+          return {
+            kind: "duplicate_sent",
+            outboxId: existing.id,
+            chatId: existing.chatId,
+            telegramMessageId: existing.telegramMessageId,
+          };
+        }
+        if ((existing.status === "queued" || existing.status === "sending") && existing.expiresAtMs > params.nowMs) {
+          throw new ToolError({
+            category: "rate_limit",
+            retryable: true,
+            message: "Send with this dedupe_key is already queued or sending.",
+          });
+        }
+      }
+
+      this.assertSendThrottleAvailable(params);
+
+      if (existing) {
+        this.db
+          .prepare(
+            `UPDATE send_outbox
+             SET chat_id = ?, reply_to_message_id = ?, user_key = ?, status = 'queued',
+                 telegram_message_id = NULL, error = NULL, updated_at_ms = ?,
+                 queued_at_ms = ?, sending_at_ms = NULL, sent_at_ms = NULL, expires_at_ms = ?
+             WHERE id = ?`,
+          )
+          .run(
+            params.chatId,
+            params.replyToMessageId ?? null,
+            params.userKey,
+            params.nowMs,
+            params.nowMs,
+            expiresAtMs,
+            existing.id,
+          );
+        this.updateSendCooldownLocked(params.chatId, params.userKey, params.nowMs + params.userCooldownMs, params.nowMs);
+        this.db.exec("COMMIT");
+        return { kind: "queued", outboxId: existing.id, expiresAtMs };
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO send_outbox (
+             id, dedupe_key, payload_hash, chat_id, reply_to_message_id, user_key,
+             status, created_at_ms, updated_at_ms, queued_at_ms, expires_at_ms
+           )
+           VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
+        )
+        .run(
+          params.outboxId,
+          params.dedupeKey ?? null,
+          params.payloadHash,
+          params.chatId,
+          params.replyToMessageId ?? null,
+          params.userKey,
+          params.nowMs,
+          params.nowMs,
+          params.nowMs,
+          expiresAtMs,
+        );
+      this.updateSendCooldownLocked(params.chatId, params.userKey, params.nowMs + params.userCooldownMs, params.nowMs);
+      this.db.exec("COMMIT");
+      return { kind: "queued", outboxId: params.outboxId, expiresAtMs };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  markSendSending(outboxId: string, nowMs = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE send_outbox
+         SET status = 'sending', sending_at_ms = ?, updated_at_ms = ?
+         WHERE id = ? AND status = 'queued'`,
+      )
+      .run(nowMs, nowMs, outboxId);
+  }
+
+  markSendSent(outboxId: string, telegramMessageId: number | undefined, nowMs = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE send_outbox
+         SET status = 'sent', telegram_message_id = ?, sent_at_ms = ?, updated_at_ms = ?, error = NULL
+         WHERE id = ?`,
+      )
+      .run(telegramMessageId ?? null, nowMs, nowMs, outboxId);
+  }
+
+  markSendFailed(outboxId: string, error: string, nowMs = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE send_outbox
+         SET status = 'failed', error = ?, updated_at_ms = ?
+         WHERE id = ?`,
+      )
+      .run(error, nowMs, outboxId);
+  }
+
+  markSendExpired(outboxId: string, error = "Queued send expired before execution.", nowMs = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE send_outbox
+         SET status = 'expired', error = ?, updated_at_ms = ?
+         WHERE id = ?`,
+      )
+      .run(error, nowMs, outboxId);
+  }
+
+  getSendOutboxByDedupeKey(dedupeKey: string): StoredSendOutboxItem | undefined {
+    return this.getSendByDedupeKeyLocked(dedupeKey);
+  }
+
   startHistoryJob(chatId: string, direction: "recent" | "backfill" | "manual", targetCount: number): string {
     const jobId = `hist_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     this.db
@@ -455,6 +631,98 @@ export class MessageStore {
       (this.db.prepare("SELECT * FROM sync_state WHERE chat_id = ?").get(chatId) as Record<string, unknown> | undefined) ??
       {};
     return { ...messageStats, syncState, embeddings: this.getEmbeddingStats(chatId) };
+  }
+
+  private assertSendThrottleAvailable(params: {
+    chatId: string;
+    userKey: string;
+    nowMs: number;
+    maxPendingPerUserPerChat: number;
+    maxQueuePerChat: number;
+  }): void {
+    const cooldown = this.db
+      .prepare(
+        `SELECT next_allowed_at_ms
+         FROM send_throttle_state
+         WHERE chat_id = ? AND user_key = ?`,
+      )
+      .get(params.chatId, params.userKey) as Record<string, unknown> | undefined;
+    const nextAllowedAtMs = Number(cooldown?.next_allowed_at_ms ?? 0);
+    if (nextAllowedAtMs > params.nowMs) {
+      throw new ToolError({
+        category: "rate_limit",
+        retryable: true,
+        retryAfterSec: Math.ceil((nextAllowedAtMs - params.nowMs) / 1000),
+        message: "Per-user cooldown is active.",
+      });
+    }
+
+    const pendingUser = this.countActiveSendsLocked({
+      chatId: params.chatId,
+      userKey: params.userKey,
+      nowMs: params.nowMs,
+    });
+    if (pendingUser >= params.maxPendingPerUserPerChat) {
+      throw new ToolError({
+        category: "rate_limit",
+        retryable: true,
+        message: "Per-user pending limit reached.",
+      });
+    }
+
+    const pendingChat = this.countActiveSendsLocked({
+      chatId: params.chatId,
+      nowMs: params.nowMs,
+    });
+    if (pendingChat >= params.maxQueuePerChat) {
+      throw new ToolError({
+        category: "rate_limit",
+        retryable: true,
+        message: "Per-chat queue is full.",
+      });
+    }
+  }
+
+  private countActiveSendsLocked(params: { chatId: string; userKey?: string; nowMs: number }): number {
+    const clauses = ["chat_id = ?", "status IN ('queued', 'sending')", "expires_at_ms > ?"];
+    const values: unknown[] = [params.chatId, params.nowMs];
+    if (params.userKey != null) {
+      clauses.push("user_key = ?");
+      values.push(params.userKey);
+    }
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS count FROM send_outbox WHERE ${clauses.join(" AND ")}`)
+      .get(...toSqlValues(values)) as Record<string, unknown> | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  private updateSendCooldownLocked(chatId: string, userKey: string, nextAllowedAtMs: number, nowMs: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO send_throttle_state (chat_id, user_key, next_allowed_at_ms, updated_at_ms)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(chat_id, user_key) DO UPDATE SET
+           next_allowed_at_ms = excluded.next_allowed_at_ms,
+           updated_at_ms = excluded.updated_at_ms`,
+      )
+      .run(chatId, userKey, nextAllowedAtMs, nowMs);
+  }
+
+  private expireStaleSendsLocked(nowMs: number): void {
+    this.db
+      .prepare(
+        `UPDATE send_outbox
+         SET status = 'expired', error = COALESCE(error, 'Queued send expired before execution.'), updated_at_ms = ?
+         WHERE status IN ('queued', 'sending') AND expires_at_ms <= ?`,
+      )
+      .run(nowMs, nowMs);
+  }
+
+  private getSendByDedupeKeyLocked(dedupeKey: string): StoredSendOutboxItem | undefined {
+    const row = this.db.prepare("SELECT * FROM send_outbox WHERE dedupe_key = ?").get(dedupeKey) as
+      | Record<string, unknown>
+      | undefined;
+    return row == null ? undefined : rowToSendOutboxItem(row);
   }
 
   private migrate(): void {
@@ -509,6 +777,32 @@ export class MessageStore {
         error TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS send_outbox (
+        id TEXT PRIMARY KEY,
+        dedupe_key TEXT UNIQUE,
+        payload_hash TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        reply_to_message_id INTEGER,
+        user_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('queued', 'sending', 'sent', 'failed', 'expired')),
+        telegram_message_id INTEGER,
+        error TEXT,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        queued_at_ms INTEGER,
+        sending_at_ms INTEGER,
+        sent_at_ms INTEGER,
+        expires_at_ms INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS send_throttle_state (
+        chat_id TEXT NOT NULL,
+        user_key TEXT NOT NULL,
+        next_allowed_at_ms INTEGER NOT NULL DEFAULT 0,
+        updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY(chat_id, user_key)
+      );
+
       CREATE TABLE IF NOT EXISTS message_embedding_chunks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id TEXT NOT NULL,
@@ -554,6 +848,10 @@ export class MessageStore {
         ON message_embedding_chunks(chat_id, embedding_model, embedding_dimensions);
       CREATE INDEX IF NOT EXISTS idx_embedding_chunks_range
         ON message_embedding_chunks(chat_id, start_message_id, end_message_id);
+      CREATE INDEX IF NOT EXISTS idx_send_outbox_chat_status
+        ON send_outbox(chat_id, status, expires_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_send_outbox_user_status
+        ON send_outbox(chat_id, user_key, status, expires_at_ms);
     `);
     this.ensureColumn("sync_state", "next_backfill_offset_id", "INTEGER");
     this.ensureColumn("sync_state", "last_recent_sync_at", "TEXT");
@@ -654,6 +952,26 @@ function rowToEmbeddingChunk(row: Record<string, unknown>): StoredEmbeddingChunk
     embedding: row.embedding as Uint8Array,
     contentHash: String(row.content_hash),
     updatedAt: String(row.updated_at),
+  };
+}
+
+function rowToSendOutboxItem(row: Record<string, unknown>): StoredSendOutboxItem {
+  return {
+    id: String(row.id),
+    dedupeKey: row.dedupe_key == null ? undefined : String(row.dedupe_key),
+    payloadHash: String(row.payload_hash),
+    chatId: String(row.chat_id),
+    replyToMessageId: row.reply_to_message_id == null ? undefined : Number(row.reply_to_message_id),
+    userKey: String(row.user_key),
+    status: String(row.status) as SendOutboxStatus,
+    telegramMessageId: row.telegram_message_id == null ? undefined : Number(row.telegram_message_id),
+    error: row.error == null ? undefined : String(row.error),
+    createdAtMs: Number(row.created_at_ms),
+    updatedAtMs: Number(row.updated_at_ms),
+    queuedAtMs: row.queued_at_ms == null ? undefined : Number(row.queued_at_ms),
+    sendingAtMs: row.sending_at_ms == null ? undefined : Number(row.sending_at_ms),
+    sentAtMs: row.sent_at_ms == null ? undefined : Number(row.sent_at_ms),
+    expiresAtMs: Number(row.expires_at_ms),
   };
 }
 

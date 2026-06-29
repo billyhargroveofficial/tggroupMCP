@@ -17,6 +17,7 @@ type ToolDef = {
 
 const chatSchema = z.object({ chat: z.string().optional() });
 const limitSchema = z.number().int().positive();
+const SERVER_SEND_USER_KEY = "mcp-server";
 
 type ToolContent = { content: Array<{ type: "text"; text: string }> };
 
@@ -35,7 +36,7 @@ export class TelegramTools {
     private readonly telegram: TelegramService,
     private readonly store: MessageStore,
   ) {
-    this.throttler = new SendThrottler(config);
+    this.throttler = new SendThrottler(config, store);
     this.syncer = new HistorySyncer(config, telegram, store);
     this.vectorRag = new VectorRag(config, store);
     this.approvals = new SendApprovalRegistry(config.safety.liveSendApprovalTtlMs);
@@ -157,7 +158,6 @@ export class TelegramTools {
           dry_run: boolProp("Force dry run."),
           approval_id: stringProp("Short-lived approval id returned by preview_message; required for live sends unless admin bypass is enabled."),
           dedupe_key: stringProp("Optional caller-provided idempotency key."),
-          user_key: stringProp("Logical user key for cooldown. Default mcp-agent."),
         }, ["text"]),
       },
       {
@@ -173,7 +173,6 @@ export class TelegramTools {
           dry_run: boolProp("Force dry run."),
           approval_id: stringProp("Short-lived approval id returned by preview_message; required for live sends unless admin bypass is enabled."),
           dedupe_key: stringProp("Optional caller-provided idempotency key."),
-          user_key: stringProp("Logical user key for cooldown. Default mcp-agent."),
         }, ["message_id", "text"]),
       },
     ];
@@ -436,6 +435,7 @@ export class TelegramTools {
       })
       .parse(rawArgs ?? {});
     const resolved = await this.telegram.resolveChat(args.chat);
+    this.store.upsertChat(resolved.info);
     const warnings = validateSendText(args.text, this.config.safety.maxSendChars);
     const approval = this.approvals.create(
       approvalPayload({
@@ -473,11 +473,11 @@ export class TelegramTools {
         dry_run: z.boolean().optional(),
         approval_id: z.string().optional(),
         dedupe_key: z.string().optional(),
-        user_key: z.string().default("mcp-agent"),
       })
       .parse(rawArgs ?? {});
 
     const resolved = await this.telegram.resolveChat(args.chat);
+    this.store.upsertChat(resolved.info);
     const warnings = validateSendText(args.text, this.config.safety.maxSendChars);
     if (warnings.some((warning) => warning.severity === "error")) {
       throw new ToolError({ category: "formatting", retryable: false, message: warnings.map((w) => w.message).join("; ") });
@@ -498,24 +498,24 @@ export class TelegramTools {
       });
     }
 
+    const payload = approvalPayload({
+      chatId: resolved.info.chatId,
+      text: args.text,
+      parseMode: args.parse_mode,
+      replyToMessageId: args.reply_to_message_id,
+      linkPreview: args.link_preview,
+      silent: args.silent,
+    });
     if (!this.config.safety.liveSendApprovalBypass) {
-      this.approvals.consume(
-        args.approval_id,
-        approvalPayload({
-          chatId: resolved.info.chatId,
-          text: args.text,
-          parseMode: args.parse_mode,
-          replyToMessageId: args.reply_to_message_id,
-          linkPreview: args.link_preview,
-          silent: args.silent,
-        }),
-      );
+      this.approvals.consume(args.approval_id, payload);
     }
 
-    this.throttler.dedupe(args.dedupe_key);
     const sent = await this.throttler.run({
       chatId: resolved.info.chatId,
-      userId: args.user_key,
+      dedupeKey: args.dedupe_key,
+      payloadHash: sendPayloadHash(payload),
+      replyToMessageId: args.reply_to_message_id,
+      userKey: SERVER_SEND_USER_KEY,
       action: () =>
         this.telegram.sendMessage({
           chat: resolved.info.chatId,
@@ -540,7 +540,6 @@ export class TelegramTools {
         dry_run: z.boolean().optional(),
         approval_id: z.string().optional(),
         dedupe_key: z.string().optional(),
-        user_key: z.string().default("mcp-agent"),
       })
       .parse(rawArgs ?? {});
     return this.sendMessage({
@@ -553,7 +552,6 @@ export class TelegramTools {
       dry_run: args.dry_run,
       approval_id: args.approval_id,
       dedupe_key: args.dedupe_key,
-      user_key: args.user_key,
     });
   }
 
@@ -679,6 +677,22 @@ function sameApprovalPayload(left: SendApprovalPayload, right: SendApprovalPaylo
     left.linkPreview === right.linkPreview &&
     left.silent === right.silent
   );
+}
+
+function sendPayloadHash(payload: SendApprovalPayload): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        chatId: payload.chatId,
+        textHash: payload.textHash,
+        replyToMessageId: payload.replyToMessageId,
+        parseMode: payload.parseMode,
+        linkPreview: payload.linkPreview,
+        silent: payload.silent,
+      }),
+      "utf8",
+    )
+    .digest("hex");
 }
 
 function approvalError(message: string): ToolError {

@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { AppConfig } from "../src/config.js";
+import { MessageStore } from "../src/store.js";
 import { TelegramTools } from "../src/tools.js";
 import type { ChatInfo, TelegramService } from "../src/telegram-client.js";
-import type { MessageStore } from "../src/store.js";
 
 type ToolPayload = Record<string, unknown> & { ok: boolean };
 
 class FakeTelegram {
   sends: Array<Record<string, unknown>> = [];
+  failNextSend: Error | undefined;
+  onSend: ((callNumber: number, params: Record<string, unknown>) => Promise<void> | void) | undefined;
 
   get isConfigured(): boolean {
     return true;
@@ -27,9 +33,16 @@ class FakeTelegram {
 
   async sendMessage(params: Record<string, unknown>): Promise<{ id: number; chat: ChatInfo }> {
     this.sends.push(params);
+    const callNumber = this.sends.length;
+    if (this.failNextSend) {
+      const error = this.failNextSend;
+      this.failNextSend = undefined;
+      throw error;
+    }
+    await this.onSend?.(callNumber, params);
     const chatId = String(params.chat ?? "-1001");
     return {
-      id: 9000 + this.sends.length,
+      id: 9000 + callNumber,
       chat: {
         chatId,
         requested: chatId,
@@ -41,7 +54,7 @@ class FakeTelegram {
 
 test("hard dry-run mode cannot be bypassed with dry_run:false", async () => {
   const telegram = new FakeTelegram();
-  const tools = makeTools(telegram, { dryRunDefault: true });
+  const { tools } = makeTools(telegram, { safety: { dryRunDefault: true } });
 
   const result = await callTool(tools, "send_message", {
     text: "safe preview only",
@@ -56,7 +69,7 @@ test("hard dry-run mode cannot be bypassed with dry_run:false", async () => {
 
 test("live send rejects without an approval id", async () => {
   const telegram = new FakeTelegram();
-  const tools = makeTools(telegram);
+  const { tools } = makeTools(telegram);
 
   const result = await callTool(tools, "send_message", {
     text: "needs approval",
@@ -71,7 +84,7 @@ test("live send rejects without an approval id", async () => {
 
 test("live send rejects when approval metadata does not match", async () => {
   const telegram = new FakeTelegram();
-  const tools = makeTools(telegram);
+  const { tools } = makeTools(telegram);
   const preview = await callTool(tools, "preview_message", {
     chat: "-1001",
     text: "approved text",
@@ -112,7 +125,7 @@ test("live send rejects when approval metadata does not match", async () => {
 
 test("approved live send posts once and consumes the approval", async () => {
   const telegram = new FakeTelegram();
-  const tools = makeTools(telegram);
+  const { tools } = makeTools(telegram);
   const preview = await callTool(tools, "preview_message", {
     chat: "-1001",
     text: "ship it",
@@ -156,8 +169,180 @@ test("approved live send posts once and consumes the approval", async () => {
   assert.equal(telegram.sends.length, 1);
 });
 
-function makeTools(telegram: FakeTelegram, safety?: Partial<AppConfig["safety"]>): TelegramTools {
-  return new TelegramTools(
+test("sent dedupe keys survive a fresh tools instance", async (t) => {
+  const dbPath = tempDbPath(t);
+  const firstTelegram = new FakeTelegram();
+  const { tools: firstTools } = makeTools(firstTelegram, {
+    dbPath,
+    throttle: { userCooldownMs: 0 },
+  });
+  const firstPreview = await callTool(firstTools, "preview_message", {
+    chat: "-1001",
+    text: "dedupe me",
+  });
+  const firstSend = await callTool(firstTools, "send_message", {
+    chat: "-1001",
+    text: "dedupe me",
+    dry_run: false,
+    approval_id: firstPreview.approval_id,
+    dedupe_key: "dedupe/restart",
+  });
+
+  assert.equal(firstSend.ok, true);
+  assert.equal(firstTelegram.sends.length, 1);
+
+  const secondTelegram = new FakeTelegram();
+  const { tools: secondTools } = makeTools(secondTelegram, {
+    dbPath,
+    throttle: { userCooldownMs: 0 },
+  });
+  const secondPreview = await callTool(secondTools, "preview_message", {
+    chat: "-1001",
+    text: "dedupe me",
+  });
+  const duplicate = await callTool(secondTools, "send_message", {
+    chat: "-1001",
+    text: "dedupe me",
+    dry_run: false,
+    approval_id: secondPreview.approval_id,
+    dedupe_key: "dedupe/restart",
+  });
+
+  assert.equal(duplicate.ok, true);
+  assert.equal((duplicate.sent as { id?: number }).id, (firstSend.sent as { id?: number }).id);
+  assert.equal(
+    ((duplicate.sent as { chat: { chatId: string } }).chat).chatId,
+    ((firstSend.sent as { chat: { chatId: string } }).chat).chatId,
+  );
+  assert.equal(secondTelegram.sends.length, 0);
+});
+
+test("failed sends can retry with the same dedupe key", async () => {
+  const telegram = new FakeTelegram();
+  telegram.failNextSend = new Error("temporary send failure");
+  const { tools, store } = makeTools(telegram, {
+    throttle: { userCooldownMs: 0 },
+  });
+  const preview = await callTool(tools, "preview_message", {
+    text: "retry me",
+  });
+  const failed = await callTool(tools, "send_message", {
+    text: "retry me",
+    dry_run: false,
+    approval_id: preview.approval_id,
+    dedupe_key: "dedupe/retry",
+  });
+
+  assert.equal(failed.ok, false);
+  assert.equal(store.getSendOutboxByDedupeKey("dedupe/retry")?.status, "failed");
+
+  const retryPreview = await callTool(tools, "preview_message", {
+    text: "retry me",
+  });
+  const retried = await callTool(tools, "send_message", {
+    text: "retry me",
+    dry_run: false,
+    approval_id: retryPreview.approval_id,
+    dedupe_key: "dedupe/retry",
+  });
+
+  assert.equal(retried.ok, true);
+  assert.equal(store.getSendOutboxByDedupeKey("dedupe/retry")?.status, "sent");
+  assert.equal(telegram.sends.length, 2);
+});
+
+test("queued sends expire before execution", async () => {
+  const telegram = new FakeTelegram();
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  telegram.onSend = async (callNumber) => {
+    if (callNumber === 1) {
+      await firstGate;
+    }
+  };
+  const { tools, store } = makeTools(telegram, {
+    throttle: {
+      userCooldownMs: 0,
+      maxAgeMs: 5,
+      globalConcurrency: 1,
+      maxRunningPerChat: 1,
+    },
+  });
+
+  const firstPreview = await callTool(tools, "preview_message", {
+    text: "first",
+  });
+  const secondPreview = await callTool(tools, "preview_message", {
+    text: "second",
+  });
+  const firstSend = callTool(tools, "send_message", {
+    text: "first",
+    dry_run: false,
+    approval_id: firstPreview.approval_id,
+    dedupe_key: "dedupe/first",
+  });
+  const secondSend = callTool(tools, "send_message", {
+    text: "second",
+    dry_run: false,
+    approval_id: secondPreview.approval_id,
+    dedupe_key: "dedupe/second",
+  });
+
+  await sleep(20);
+  releaseFirst();
+
+  assert.equal((await firstSend).ok, true);
+  const expired = await secondSend;
+  assert.equal(expired.ok, false);
+  assert.equal((expired.error as { category: string }).category, "rate_limit");
+  assert.equal(store.getSendOutboxByDedupeKey("dedupe/second")?.status, "expired");
+  assert.equal(telegram.sends.length, 1);
+});
+
+test("caller-supplied user_key cannot bypass persisted cooldown", async () => {
+  const telegram = new FakeTelegram();
+  const { tools } = makeTools(telegram, {
+    throttle: { userCooldownMs: 60_000 },
+  });
+  const firstPreview = await callTool(tools, "preview_message", {
+    text: "cooldown one",
+  });
+  const firstSend = await callTool(tools, "send_message", {
+    text: "cooldown one",
+    dry_run: false,
+    approval_id: firstPreview.approval_id,
+    user_key: "caller-a",
+  });
+
+  assert.equal(firstSend.ok, true);
+
+  const secondPreview = await callTool(tools, "preview_message", {
+    text: "cooldown two",
+  });
+  const secondSend = await callTool(tools, "send_message", {
+    text: "cooldown two",
+    dry_run: false,
+    approval_id: secondPreview.approval_id,
+    user_key: "caller-b",
+  });
+
+  assert.equal(secondSend.ok, false);
+  assert.equal((secondSend.error as { category: string }).category, "rate_limit");
+  assert.equal(telegram.sends.length, 1);
+});
+
+function makeTools(
+  telegram: FakeTelegram,
+  options: {
+    dbPath?: string;
+    safety?: Partial<AppConfig["safety"]>;
+    throttle?: Partial<AppConfig["throttle"]>;
+  } = {},
+): { tools: TelegramTools; store: MessageStore } {
+  const store = new MessageStore(options.dbPath ?? ":memory:");
+  const tools = new TelegramTools(
     {
       telegram: {
         apiId: 1,
@@ -178,7 +363,7 @@ function makeTools(telegram: FakeTelegram, safety?: Partial<AppConfig["safety"]>
         maxSendChars: 4096,
         liveSendApprovalTtlMs: 60_000,
         liveSendApprovalBypass: false,
-        ...safety,
+        ...options.safety,
       },
       sync: {
         batchSize: 100,
@@ -208,14 +393,22 @@ function makeTools(telegram: FakeTelegram, safety?: Partial<AppConfig["safety"]>
         maxAgeMs: 120_000,
         globalConcurrency: 2,
         maxRunningPerChat: 1,
+        ...options.throttle,
       },
     },
     telegram as unknown as TelegramService,
-    {} as MessageStore,
+    store,
   );
+  return { tools, store };
 }
 
 async function callTool(tools: TelegramTools, name: string, args: unknown): Promise<ToolPayload> {
   const result = await tools.callTool(name, args);
   return JSON.parse(result.content[0]!.text) as ToolPayload;
+}
+
+function tempDbPath(t: { after(fn: () => void): void }): string {
+  const dir = mkdtempSync(join(tmpdir(), "telegram-parilka-mcp-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return join(dir, "messages.sqlite");
 }
