@@ -610,7 +610,24 @@ Important operating rule:
   - Tests assert the selected MCP-level failure signal for validation failures.
   - Tool docs match behavior.
 
-- [ ] 16. Normalize `search_messages` result counters and partial-success metadata.
+- [x] 16. Normalize `search_messages` result counters and partial-success metadata.
+
+  Status 2026-06-29: Completed. `search_messages` now computes hybrid hits once and sets `hybrid.count` to the final
+  `hybrid.hits.length`; `hybrid.raw_candidate_count` exposes keyword plus vector candidates before merge/dedupe.
+  Top-level `results` / `result_count` provide a canonical flattened ranked output while the older top-level
+  `messages` remains keyword-only compatibility data. Vector-disabled, no-index, provider-failure, and candidate-limit
+  cases now return `status:"partial"` with `degraded_channels` and `partial_failure` metadata while preserving keyword
+  results. Successful full keyword+vector searches return `status:"done"` with empty degraded metadata.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/tools-response.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   `hybrid.count` can disagree with `hybrid.hits.length` after dedupe. `search_messages` also returns top-level `messages` as keyword-only while vector failures are downgraded into nested metadata with top-level `ok:true`.

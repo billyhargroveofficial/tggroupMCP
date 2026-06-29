@@ -57,6 +57,12 @@ For `semantic_search_messages` and vector/hybrid portions of `search_messages`, 
 message windows. Candidate chunks may overlap the window for scoring, but returned chunk `messageIds`, hydrated
 `messages`, `startMessageId`/`endMessageId`, and text are trimmed to in-window messages only.
 
+For `search_messages`, prefer top-level `results` / `result_count` as the canonical flattened ranked output. The older
+top-level `messages` field is keyword-only compatibility data. `hybrid.count` is the final `hybrid.hits.length`, while
+`hybrid.raw_candidate_count` reports keyword plus vector candidates before merge/dedupe. When vector search is disabled,
+unindexed, provider-failed, or candidate-limited, the tool returns `status:"partial"` with `degraded_channels` and
+`partial_failure` metadata while preserving keyword results.
+
 `sync_history` uses explicit status values:
 
 ```json

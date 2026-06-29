@@ -453,9 +453,23 @@ export class TelegramTools {
         stats: this.store.getEmbeddingStats(chat.chatId),
         hits: [],
       }));
+    const hybridHits = this.vectorRag.hybrid(keywordHits, vector.hits, hybridLimit);
+    const degradedChannels = vector.available
+      ? []
+      : [
+          {
+            channel: "vector",
+            reason: vector.error ?? "Vector search is unavailable.",
+          },
+        ];
     return ok({
+      status: degradedChannels.length > 0 ? "partial" : "done",
       chat,
       query: args.query,
+      result_count: hybridHits.length,
+      results: hybridHits,
+      degraded_channels: degradedChannels,
+      partial_failure: degradedChannels.length > 0 ? { degraded_channels: degradedChannels } : null,
       messages: keywordHits.map((hit) => hit.message),
       keyword: {
         count: keywordHits.length,
@@ -463,8 +477,9 @@ export class TelegramTools {
       },
       vector,
       hybrid: {
-        count: Math.min(hybridLimit, keywordHits.length + vector.hits.length),
-        hits: this.vectorRag.hybrid(keywordHits, vector.hits, hybridLimit),
+        count: hybridHits.length,
+        raw_candidate_count: keywordHits.length + vector.hits.length,
+        hits: hybridHits,
       },
     });
   }

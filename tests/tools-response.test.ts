@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AppConfig } from "../src/config.js";
+import { embeddingNamespace, vectorToBlob } from "../src/embeddings.js";
 import { MessageStore } from "../src/store.js";
 import { TelegramTools } from "../src/tools.js";
 import type { ChatInfo, TelegramService } from "../src/telegram-client.js";
@@ -234,8 +235,114 @@ test("get_thread_context reports center_found and partial cache range", async ()
   assert.deepEqual(cache.requested_range, { start_message_id: 10, end_message_id: 14 });
 });
 
-function makeTools(store = new MessageStore(":memory:")): TelegramTools {
-  return new TelegramTools(config(), new FakeTelegram() as unknown as TelegramService, store);
+test("search_messages reports degraded vector channel when embeddings are disabled", async () => {
+  const store = new MessageStore(":memory:");
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 1, text: "needle one" },
+    { chatId: CHAT.chatId, messageId: 2, text: "needle two" },
+  ]);
+
+  const result = await callTool(makeTools(store), "search_messages", {
+    query: "needle",
+    limit: 10,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "partial");
+  assertVectorDegraded(result, /Embeddings are disabled/);
+  assert.equal((result.messages as unknown[]).length, 2);
+  assertCanonicalSearchCounts(result);
+});
+
+test("search_messages reports no-index vector channel as partial success", async () => {
+  const store = new MessageStore(":memory:");
+  store.upsertMessages(CHAT, [{ chatId: CHAT.chatId, messageId: 1, text: "needle one" }]);
+  const cfg = configuredEmbeddingsConfig();
+
+  const result = await callTool(makeTools(store, cfg), "search_messages", {
+    query: "needle",
+    limit: 10,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "partial");
+  assertVectorDegraded(result, /No vector chunks indexed yet/);
+  assertCanonicalSearchCounts(result);
+});
+
+test("search_messages reports provider vector failures as degraded channels", async (t) => {
+  const providerStore = new MessageStore(":memory:");
+  providerStore.upsertMessages(CHAT, [{ chatId: CHAT.chatId, messageId: 1, text: "needle provider" }]);
+  const providerConfig = configuredEmbeddingsConfig();
+  addEmbeddingChunk(providerStore, providerConfig, {
+    messageIds: [1],
+    text: "needle provider",
+    vector: [1, 0],
+  });
+  mockFetch(t, async () => {
+    throw new Error("provider boom");
+  });
+
+  const providerFailure = await callTool(makeTools(providerStore, providerConfig), "search_messages", {
+    query: "needle",
+    limit: 10,
+  });
+
+  assert.equal(providerFailure.status, "partial");
+  assertVectorDegraded(providerFailure, /provider boom/);
+  assertCanonicalSearchCounts(providerFailure);
+});
+
+test("search_messages reports candidate-limit vector failures as degraded channels", async (t) => {
+  const candidateStore = new MessageStore(":memory:");
+  candidateStore.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 1, text: "needle one" },
+    { chatId: CHAT.chatId, messageId: 2, text: "needle two" },
+  ]);
+  const candidateConfig = configuredEmbeddingsConfig({ vectorCandidateLimit: 1 });
+  addEmbeddingChunk(candidateStore, candidateConfig, { messageIds: [1], text: "needle one", vector: [1, 0] });
+  addEmbeddingChunk(candidateStore, candidateConfig, { messageIds: [2], text: "needle two", vector: [0.9, 0.1] });
+  mockFetch(t, async () => embeddingResponse([1, 0]));
+
+  const candidateFailure = await callTool(makeTools(candidateStore, candidateConfig), "search_messages", {
+    query: "needle",
+    limit: 10,
+  });
+
+  assert.equal(candidateFailure.status, "partial");
+  assertVectorDegraded(candidateFailure, /candidate limit 1 exceeded/);
+  assertCanonicalSearchCounts(candidateFailure);
+});
+
+test("search_messages exposes canonical mixed keyword vector and hybrid results", async (t) => {
+  mockFetch(t, async () => embeddingResponse([1, 0]));
+  const store = new MessageStore(":memory:");
+  store.upsertMessages(CHAT, [
+    { chatId: CHAT.chatId, messageId: 1, senderName: "alice", text: "needle keyword only" },
+    { chatId: CHAT.chatId, messageId: 2, senderName: "bob", text: "needle overlap" },
+    { chatId: CHAT.chatId, messageId: 3, senderName: "carol", text: "semantic only" },
+  ]);
+  const cfg = configuredEmbeddingsConfig();
+  addEmbeddingChunk(store, cfg, { messageIds: [2], text: "needle overlap", vector: [1, 0] });
+  addEmbeddingChunk(store, cfg, { messageIds: [3], text: "semantic only", vector: [0.9, 0.1] });
+
+  const result = await callTool(makeTools(store, cfg), "search_messages", {
+    query: "needle",
+    limit: 10,
+  });
+  const results = result.results as Array<{ source: string; messageId?: number; startMessageId?: number }>;
+
+  assert.equal(result.status, "done");
+  assert.deepEqual(result.degraded_channels, []);
+  assert.equal(result.partial_failure, null);
+  assertCanonicalSearchCounts(result);
+  assert.equal(results.some((hit) => hit.source === "keyword" && hit.messageId === 1), true);
+  assert.equal(results.some((hit) => hit.source === "hybrid" && hit.messageId === 2), true);
+  assert.equal(results.some((hit) => hit.source === "vector" && hit.startMessageId === 3), true);
+});
+
+function makeTools(store = new MessageStore(":memory:"), appConfig = config()): TelegramTools {
+  return new TelegramTools(appConfig, new FakeTelegram() as unknown as TelegramService, store);
 }
 
 function config(): AppConfig {
@@ -300,6 +407,81 @@ function config(): AppConfig {
       maxRunningPerChat: 1,
     },
   };
+}
+
+function configuredEmbeddingsConfig(embeddings: Partial<AppConfig["embeddings"]> = {}): AppConfig {
+  const cfg = config();
+  cfg.embeddings = {
+    ...cfg.embeddings,
+    enabled: true,
+    apiKey: "test-key",
+    dimensions: 2,
+    maxRetries: 0,
+    ...embeddings,
+  };
+  return cfg;
+}
+
+function addEmbeddingChunk(
+  store: MessageStore,
+  cfg: AppConfig,
+  params: { messageIds: number[]; text: string; vector: number[] },
+): void {
+  store.upsertEmbeddingChunks([
+    {
+      chatId: CHAT.chatId,
+      startMessageId: Math.min(...params.messageIds),
+      endMessageId: Math.max(...params.messageIds),
+      messageIds: params.messageIds,
+      messageCount: params.messageIds.length,
+      text: params.text,
+      namespace: embeddingNamespace(cfg),
+      model: cfg.embeddings.model,
+      dimensions: cfg.embeddings.dimensions ?? params.vector.length,
+      embedding: vectorToBlob(params.vector),
+      contentHash: `test-${params.messageIds.join("-")}`,
+    },
+  ]);
+}
+
+function assertCanonicalSearchCounts(result: Record<string, unknown>): void {
+  const hybrid = result.hybrid as { count: number; raw_candidate_count: number; hits: unknown[] };
+  const keyword = result.keyword as { count: number };
+  const vector = result.vector as { hits: unknown[] };
+  const results = result.results as unknown[];
+
+  assert.equal(hybrid.count, hybrid.hits.length);
+  assert.equal(hybrid.raw_candidate_count, keyword.count + vector.hits.length);
+  assert.equal(result.result_count, results.length);
+  assert.deepEqual(results, hybrid.hits);
+}
+
+function assertVectorDegraded(result: Record<string, unknown>, reason: RegExp): void {
+  const degraded = result.degraded_channels as Array<{ channel: string; reason: string }>;
+  assert.equal(degraded.length, 1);
+  assert.equal(degraded[0]?.channel, "vector");
+  assert.match(degraded[0]?.reason ?? "", reason);
+  assert.deepEqual(result.partial_failure, { degraded_channels: degraded });
+}
+
+function mockFetch(t: { after(fn: () => void): void }, handler: typeof globalThis.fetch): void {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = handler;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+}
+
+function embeddingResponse(vector: number[]): Response {
+  return new Response(
+    JSON.stringify({
+      data: [{ index: 0, embedding: vector }],
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    },
+  );
 }
 
 async function callTool(tools: TelegramTools, name: string, args: unknown): Promise<Record<string, unknown> & { ok: boolean }> {
