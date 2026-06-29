@@ -535,7 +535,23 @@ Important operating rule:
   - Tests prove dedupe behavior before and after TTL expiry.
   - Docs and config names match the behavior.
 
-- [ ] 14. Filter tombstoned messages from FTS search.
+- [x] 14. Filter tombstoned messages from FTS search.
+
+  Status 2026-06-29: Completed. Keyword FTS search now filters `m.deleted_at IS NULL`, so tombstoned rows cannot be
+  returned by stale FTS sender-name content even though the trigger keeps a contentless FTS row for the deleted message.
+  Existing FTS triggers and rebuild behavior were left unchanged; query-time filtering closes the leak without a heavy
+  trigger-definition migration. Tombstone coverage now asserts both deleted text and deleted sender searches return
+  zero results.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/sync-engine.test.ts tests/store-migrations.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper`
 
   Problem:
   Tombstoning clears text but leaves sender name indexed. `searchWithRank()` does not filter `deleted_at IS NULL`, so deleted messages can still match sender searches.

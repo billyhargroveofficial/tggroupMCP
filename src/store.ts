@@ -310,7 +310,7 @@ export class MessageStore {
   }
 
   searchWithRank(params: { chatId: string; query: string; limit: number; beforeId?: number; afterId?: number }): KeywordSearchHit[] {
-    const clauses = ["m.chat_id = ?", "messages_fts MATCH ?"];
+    const clauses = ["m.chat_id = ?", "m.deleted_at IS NULL", "messages_fts MATCH ?"];
     const values: unknown[] = [params.chatId, escapeFtsQuery(params.query)];
     if (params.beforeId != null) {
       clauses.push("m.message_id < ?");

@@ -460,6 +460,7 @@ test("recent reconciliation tombstones deleted messages and removes searchable c
   assert.equal(result.reconciliation?.deleted, 1);
   assert.equal(typeof message?.deletedAt, "string");
   assert.equal(store.search({ chatId: CHAT.chatId, query: "message", limit: 10 }).length, 0);
+  assert.equal(store.search({ chatId: CHAT.chatId, query: "Alice", limit: 10 }).length, 0);
 });
 
 function seededStore(newestMessageId: number): MessageStore {
@@ -468,6 +469,7 @@ function seededStore(newestMessageId: number): MessageStore {
     {
       chatId: CHAT.chatId,
       messageId: newestMessageId,
+      senderName: "Alice",
       text: `message ${newestMessageId}`,
     },
   ]);
