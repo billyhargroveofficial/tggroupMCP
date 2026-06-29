@@ -255,6 +255,13 @@ Acceptance criteria:
 
 ### 8. Version database migrations
 
+Status 2026-06-29: Completed. `MessageStore` now runs schema setup inside a `BEGIN IMMEDIATE` migration transaction, records `PRAGMA user_version = 1`, validates required tables, indexes, triggers, columns, and FTS access, and explicitly rebuilds `messages_fts` during migration so historical rows become searchable. Migration version is inspectable via `getSchemaVersion()` / `PRAGMA user_version`, and failed migration leaves `user_version` unchanged.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+
 Problem:
 Migrations are `CREATE TABLE IF NOT EXISTS` plus `ALTER TABLE ADD COLUMN`. Existing DBs will not receive changed triggers/tokenizers/constraints. FTS may not rebuild historical rows if created after messages already exist.
 

@@ -6,6 +6,7 @@ import type { ChatInfo } from "./telegram-client.js";
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
 const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
+const SCHEMA_VERSION = 1;
 
 export type StoredMessage = {
   id?: number;
@@ -93,6 +94,11 @@ export class MessageStore {
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA synchronous = NORMAL;");
     this.migrate();
+  }
+
+  getSchemaVersion(): number {
+    const row = this.db.prepare("PRAGMA user_version").get() as Record<string, unknown> | undefined;
+    return Number(row?.user_version ?? 0);
   }
 
   upsertChat(chat: ChatInfo): void {
@@ -780,6 +786,21 @@ export class MessageStore {
   }
 
   private migrate(): void {
+    this.immediateTransaction("migrate", () => {
+      const currentVersion = this.getSchemaVersion();
+      if (currentVersion > SCHEMA_VERSION) {
+        throw new Error(`Database schema version ${currentVersion} is newer than supported version ${SCHEMA_VERSION}.`);
+      }
+      if (currentVersion < 1) {
+        this.applyBaseSchema();
+        this.rebuildMessagesFts();
+        this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      }
+      this.validateSchema();
+    });
+  }
+
+  private applyBaseSchema(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS chats (
         chat_id TEXT PRIMARY KEY,
@@ -911,12 +932,83 @@ export class MessageStore {
     this.ensureColumn("sync_state", "last_recent_sync_at", "TEXT");
     this.ensureColumn("sync_state", "last_backfill_at", "TEXT");
     this.ensureColumn("sync_state", "last_error", "TEXT");
+    this.ensureColumn("messages", "date", "TEXT");
+    this.ensureColumn("messages", "sender_id", "TEXT");
+    this.ensureColumn("messages", "sender_name", "TEXT");
+    this.ensureColumn("messages", "reply_to_message_id", "INTEGER");
+    this.ensureColumn("messages", "topic_id", "INTEGER");
+    this.ensureColumn("messages", "raw_json", "TEXT");
+    this.ensureColumn("messages", "updated_at", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
     const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[];
     if (!rows.some((row) => row.name === column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+  }
+
+  private rebuildMessagesFts(): void {
+    this.db.exec("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')");
+  }
+
+  private validateSchema(): void {
+    for (const table of [
+      "chats",
+      "messages",
+      "sync_state",
+      "history_jobs",
+      "send_outbox",
+      "send_throttle_state",
+      "message_embedding_chunks",
+      "messages_fts",
+    ]) {
+      this.assertSqliteObject("table", table);
+    }
+    for (const index of [
+      "idx_messages_chat_message_id",
+      "idx_messages_sender",
+      "idx_embedding_chunks_lookup",
+      "idx_embedding_chunks_range",
+      "idx_send_outbox_chat_status",
+      "idx_send_outbox_user_status",
+    ]) {
+      this.assertSqliteObject("index", index);
+    }
+    for (const trigger of ["messages_ai", "messages_ad", "messages_au"]) {
+      this.assertSqliteObject("trigger", trigger);
+    }
+    this.assertColumns("messages", ["id", "chat_id", "message_id", "text", "updated_at"]);
+    this.assertColumns("sync_state", [
+      "chat_id",
+      "oldest_message_id",
+      "newest_message_id",
+      "next_backfill_offset_id",
+      "synced_count",
+      "last_recent_sync_at",
+      "last_backfill_at",
+      "last_error",
+      "updated_at",
+    ]);
+    this.db.prepare("SELECT rowid FROM messages_fts LIMIT 1").all();
+  }
+
+  private assertSqliteObject(type: "table" | "index" | "trigger", name: string): void {
+    const row = this.db.prepare("SELECT name FROM sqlite_master WHERE type = ? AND name = ?").get(type, name) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) {
+      throw new Error(`Database schema validation failed: missing ${type} ${name}.`);
+    }
+  }
+
+  private assertColumns(table: string, columns: string[]): void {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[];
+    const present = new Set(rows.map((row) => String(row.name)));
+    for (const column of columns) {
+      if (!present.has(column)) {
+        throw new Error(`Database schema validation failed: ${table} missing required column ${column}.`);
+      }
     }
   }
 }
