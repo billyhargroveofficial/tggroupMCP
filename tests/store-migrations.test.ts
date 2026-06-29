@@ -31,11 +31,11 @@ test("old fixture DB migrates once and rebuilds FTS for historical rows", (t) =>
 
   const store = new MessageStore(dbPath);
 
-  assert.equal(store.getSchemaVersion(), 1);
+  assert.equal(store.getSchemaVersion(), 2);
   assert.equal(store.search({ chatId: "-1001", query: "historical", limit: 10 }).length, 1);
 
   const reopened = new MessageStore(dbPath);
-  assert.equal(reopened.getSchemaVersion(), 1);
+  assert.equal(reopened.getSchemaVersion(), 2);
   assert.equal(reopened.search({ chatId: "-1001", query: "searchable", limit: 10 })[0]?.messageId, 1);
 });
 

@@ -140,6 +140,60 @@ test("recent sync with no new messages preserves the newest id", async () => {
   assert.equal(telegram.requests.length, 1);
 });
 
+test("zero-row backfill records exhausted state", async () => {
+  const store = seededStore(1000);
+  const telegram = new FakeTelegram([]);
+  const syncer = new HistorySyncer(config(), telegram as unknown as TelegramService, store);
+
+  const result = await syncer.syncDirection({
+    mode: "backfill",
+    limit: 100,
+    batchSize: 50,
+  });
+
+  assert.equal(result.status, "done");
+  assert.equal(result.fetched, 0);
+  assert.equal(typeof store.getSyncState(CHAT.chatId)?.backfillExhaustedAt, "string");
+});
+
+test("exhausted backfill is skipped while recent sync still runs", async () => {
+  const store = seededStore(1000);
+  store.setBackfillExhausted(CHAT, true);
+  const telegram = new FakeTelegram([1001]);
+  const syncer = new HistorySyncer(config(), telegram as unknown as TelegramService, store);
+
+  const result = await syncer.syncOnce({
+    recentLimit: 10,
+    backfillLimit: 10,
+    batchSize: 5,
+  });
+
+  assert.equal(result.recent?.status, "done");
+  assert.equal(result.recent?.fetched, 1);
+  assert.equal(result.backfill?.status, "skipped");
+  assert.equal(result.backfill?.skipped, "backfill_exhausted");
+  assert.equal(telegram.requests.length, 1);
+});
+
+test("resetting backfill exhausted state resumes backfill", async () => {
+  const store = seededStore(1000);
+  store.setBackfillExhausted(CHAT, true);
+  const telegram = new FakeTelegram([998, 999]);
+  const syncer = new HistorySyncer(config(), telegram as unknown as TelegramService, store);
+
+  const result = await syncer.syncDirection({
+    mode: "backfill",
+    limit: 10,
+    batchSize: 5,
+    resetBackfillExhausted: true,
+  });
+
+  assert.equal(result.status, "done");
+  assert.equal(result.fetched, 2);
+  assert.equal(store.getSyncState(CHAT.chatId)?.backfillExhaustedAt, undefined);
+  assert.equal(telegram.requests.length, 1);
+});
+
 function seededStore(newestMessageId: number): MessageStore {
   const store = new MessageStore(":memory:");
   store.upsertMessages(CHAT, [

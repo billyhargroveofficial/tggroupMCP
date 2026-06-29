@@ -6,7 +6,7 @@ import type { ChatInfo } from "./telegram-client.js";
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
 const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 export type StoredMessage = {
   id?: number;
@@ -29,6 +29,7 @@ export type SyncState = {
   syncedCount: number;
   lastRecentSyncAt?: string;
   lastBackfillAt?: string;
+  backfillExhaustedAt?: string;
   lastError?: string;
   updatedAt?: string;
 };
@@ -339,6 +340,23 @@ export class MessageStore {
     return rowToSyncState(row);
   }
 
+  setBackfillExhausted(chat: ChatInfo, exhausted: boolean): void {
+    this.immediateTransaction("setBackfillExhausted", () => {
+      this.upsertChatLocked(chat);
+      this.db
+        .prepare(
+          `INSERT INTO sync_state (
+             chat_id, synced_count, backfill_exhausted_at, updated_at
+           )
+           VALUES (?, ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, datetime('now'))
+           ON CONFLICT(chat_id) DO UPDATE SET
+             backfill_exhausted_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
+             updated_at = datetime('now')`,
+        )
+        .run(chat.chatId, this.countMessages(chat.chatId), exhausted ? 1 : 0, exhausted ? 1 : 0);
+    });
+  }
+
   countMessages(chatId: string): number {
     const row = this.db.prepare("SELECT COUNT(*) AS count FROM messages WHERE chat_id = ?").get(chatId) as
       | Record<string, unknown>
@@ -620,7 +638,7 @@ export class MessageStore {
 
   finishHistoryJob(
     jobId: string,
-    result: { status: "done" | "failed"; batches: number; messagesSeen: number; messagesUpserted: number; error?: string },
+    result: { status: "done" | "failed" | "skipped"; batches: number; messagesSeen: number; messagesUpserted: number; error?: string },
   ): void {
     this.writeWithRetry("finishHistoryJob", () => {
       this.db
@@ -794,7 +812,11 @@ export class MessageStore {
       if (currentVersion < 1) {
         this.applyBaseSchema();
         this.rebuildMessagesFts();
-        this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+        this.db.exec("PRAGMA user_version = 1");
+      }
+      if (currentVersion < 2) {
+        this.applyBackfillExhaustedMigration();
+        this.db.exec("PRAGMA user_version = 2");
       }
       this.validateSchema();
     });
@@ -834,6 +856,7 @@ export class MessageStore {
         synced_count INTEGER NOT NULL DEFAULT 0,
         last_recent_sync_at TEXT,
         last_backfill_at TEXT,
+        backfill_exhausted_at TEXT,
         last_error TEXT,
         updated_at TEXT NOT NULL
       );
@@ -931,6 +954,7 @@ export class MessageStore {
     this.ensureColumn("sync_state", "next_backfill_offset_id", "INTEGER");
     this.ensureColumn("sync_state", "last_recent_sync_at", "TEXT");
     this.ensureColumn("sync_state", "last_backfill_at", "TEXT");
+    this.ensureColumn("sync_state", "backfill_exhausted_at", "TEXT");
     this.ensureColumn("sync_state", "last_error", "TEXT");
     this.ensureColumn("messages", "date", "TEXT");
     this.ensureColumn("messages", "sender_id", "TEXT");
@@ -939,6 +963,10 @@ export class MessageStore {
     this.ensureColumn("messages", "topic_id", "INTEGER");
     this.ensureColumn("messages", "raw_json", "TEXT");
     this.ensureColumn("messages", "updated_at", "TEXT");
+  }
+
+  private applyBackfillExhaustedMigration(): void {
+    this.ensureColumn("sync_state", "backfill_exhausted_at", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -987,6 +1015,7 @@ export class MessageStore {
       "synced_count",
       "last_recent_sync_at",
       "last_backfill_at",
+      "backfill_exhausted_at",
       "last_error",
       "updated_at",
     ]);
@@ -1080,6 +1109,7 @@ function rowToSyncState(row: Record<string, unknown>): SyncState {
     syncedCount: Number(row.synced_count ?? 0),
     lastRecentSyncAt: row.last_recent_sync_at == null ? undefined : String(row.last_recent_sync_at),
     lastBackfillAt: row.last_backfill_at == null ? undefined : String(row.last_backfill_at),
+    backfillExhaustedAt: row.backfill_exhausted_at == null ? undefined : String(row.backfill_exhausted_at),
     lastError: row.last_error == null ? undefined : String(row.last_error),
     updatedAt: row.updated_at == null ? undefined : String(row.updated_at),
   };

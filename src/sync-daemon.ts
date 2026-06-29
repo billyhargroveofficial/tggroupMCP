@@ -163,6 +163,8 @@ function summarize(result: Awaited<ReturnType<HistorySyncer["syncDirection"]>> |
   }
   return {
     mode: result.mode,
+    status: result.status,
+    skipped: result.skipped,
     fetched: result.fetched,
     saved: result.saved,
     nextOffsetId: result.nextOffsetId,

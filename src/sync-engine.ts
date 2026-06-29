@@ -7,6 +7,7 @@ export type SyncDirection = "recent" | "backfill";
 
 export type SyncResult = {
   mode: SyncDirection;
+  status: "done" | "failed" | "skipped";
   chat: {
     chatId: string;
     title?: string;
@@ -19,6 +20,7 @@ export type SyncResult = {
   nextOffsetId?: number;
   oldestMessageId?: number;
   newestMessageId?: number;
+  skipped?: "backfill_exhausted";
   error?: ReturnType<typeof normalizeError>;
 };
 
@@ -73,12 +75,40 @@ export class HistorySyncer {
     limit: number;
     batchSize?: number;
     offsetId?: number;
+    resetBackfillExhausted?: boolean;
   }): Promise<SyncResult> {
     const resolved = await this.telegram.resolveChat(params.chat);
     const chat = resolved.info;
     const currentState = this.store.getSyncState(chat.chatId);
     const batchSize = Math.max(1, Math.min(params.batchSize ?? this.config.sync.batchSize, 100));
     const target = Math.max(0, Math.min(params.limit, this.config.sync.maxSyncLimit));
+
+    if (params.mode === "backfill" && params.resetBackfillExhausted) {
+      this.store.setBackfillExhausted(chat, false);
+    } else if (params.mode === "backfill" && currentState?.backfillExhaustedAt) {
+      const jobId = this.store.startHistoryJob(chat.chatId, params.mode, 0);
+      this.store.finishHistoryJob(jobId, {
+        status: "skipped",
+        batches: 0,
+        messagesSeen: 0,
+        messagesUpserted: 0,
+      });
+      return {
+        mode: params.mode,
+        status: "skipped",
+        chat: { chatId: chat.chatId, title: chat.title },
+        jobId,
+        requested: 0,
+        fetched: 0,
+        saved: 0,
+        batches: 0,
+        nextOffsetId: currentState.nextBackfillOffsetId,
+        oldestMessageId: currentState.oldestMessageId,
+        newestMessageId: currentState.newestMessageId,
+        skipped: "backfill_exhausted",
+      };
+    }
+
     const jobId = this.store.startHistoryJob(chat.chatId, params.mode, target);
 
     const backfillOffsets = [currentState?.nextBackfillOffsetId, currentState?.oldestMessageId].filter(
@@ -203,6 +233,9 @@ export class HistorySyncer {
         mode: params.mode,
         error: null,
       });
+      if (params.mode === "backfill") {
+        this.store.setBackfillExhausted(chat, fetched === 0);
+      }
       this.store.finishHistoryJob(jobId, {
         status: "done",
         batches,
@@ -212,6 +245,7 @@ export class HistorySyncer {
 
       return {
         mode: params.mode,
+        status: "done",
         chat: { chatId: chat.chatId, title: chat.title },
         jobId,
         requested: target,
@@ -238,6 +272,7 @@ export class HistorySyncer {
       });
       return {
         mode: params.mode,
+        status: "failed",
         chat: { chatId: chat.chatId, title: chat.title },
         jobId,
         requested: target,

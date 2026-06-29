@@ -285,6 +285,13 @@ Acceptance criteria:
 
 ### 9. Add backfill exhausted state
 
+Status 2026-06-29: Completed. `sync_state.backfill_exhausted_at` was added in schema version 2. A zero-row backfill marks the chat exhausted; later backfill ticks return `status:"skipped"` with `skipped:"backfill_exhausted"` without making Telegram history requests, while recent sync still runs. Manual `sync_history` can pass `reset_backfill_exhausted:true` to clear the marker and resume backfill.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+
 Problem:
 When backfill reaches the beginning and returns zero rows, the cursor stays preserved. The daemon can retry the same exhausted request every tick.
 
