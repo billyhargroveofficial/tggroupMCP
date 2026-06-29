@@ -298,15 +298,24 @@ export class VectorRag {
 
     const scored = chunks
       .map((chunk) => ({ chunk, score: cosineSimilarity(queryVector, blobToVector(chunk.embedding)) }))
-      .sort((left, right) => right.score - left.score)
-      .slice(0, limit);
+      .sort((left, right) => right.score - left.score);
+    const hits = scored
+      .map((hit) =>
+        this.toVectorHit(hit.chunk, hit.score, params.includeMessages ?? true, {
+          beforeId: params.beforeId,
+          afterId: params.afterId,
+        }),
+      )
+      .filter((hit): hit is VectorSearchHit => hit != null)
+      .slice(0, limit)
+      .map((hit, index) => ({ ...hit, rank: index + 1 }));
 
     return {
       available: true,
       stats,
       candidateLimit: this.config.embeddings.vectorCandidateLimit,
       candidateCount: chunks.length,
-      hits: scored.map((hit, index) => this.toVectorHit(hit.chunk, hit.score, index + 1, params.includeMessages ?? true)),
+      hits,
     };
   }
 
@@ -455,29 +464,54 @@ export class VectorRag {
     return { chunks: chunks.slice(0, params.limitChunks), truncatedByCharBudget };
   }
 
-  private toVectorHit(chunk: StoredEmbeddingChunk, score: number, rank: number, includeMessages: boolean): VectorSearchHit {
+  private toVectorHit(
+    chunk: StoredEmbeddingChunk,
+    score: number,
+    includeMessages: boolean,
+    window: { beforeId?: number; afterId?: number },
+  ): VectorSearchHit | undefined {
+    const messageIds = chunk.messageIds.filter((messageId) => messageIdInWindow(messageId, window));
+    if (messageIds.length === 0) {
+      return undefined;
+    }
+    const trimmed = messageIds.length !== chunk.messageIds.length;
+    const visibleMessages =
+      includeMessages || trimmed
+        ? this.store.getMessagesByIds({
+            chatId: chunk.chatId,
+            messageIds,
+          })
+        : [];
+    const visibleText = trimmed
+      ? visibleMessages.map((message) => formatMessage(message)).join("\n")
+      : chunk.text;
     return {
-      rank,
+      rank: 0,
       score,
       chunk: {
         id: chunk.id,
-        startMessageId: chunk.startMessageId,
-        endMessageId: chunk.endMessageId,
-        messageIds: chunk.messageIds,
-        messageCount: chunk.messageCount,
-        text: chunk.text,
+        startMessageId: Math.min(...messageIds),
+        endMessageId: Math.max(...messageIds),
+        messageIds,
+        messageCount: messageIds.length,
+        text: visibleText,
         namespace: chunk.namespace,
         model: chunk.model,
         dimensions: chunk.dimensions,
       },
-      messages: includeMessages
-        ? this.store.getMessagesByIds({
-            chatId: chunk.chatId,
-            messageIds: chunk.messageIds,
-          })
-        : [],
+      messages: includeMessages ? visibleMessages : [],
     };
   }
+}
+
+function messageIdInWindow(messageId: number, window: { beforeId?: number; afterId?: number }): boolean {
+  if (window.beforeId != null && messageId >= window.beforeId) {
+    return false;
+  }
+  if (window.afterId != null && messageId <= window.afterId) {
+    return false;
+  }
+  return true;
 }
 
 export function formatMessage(message: StoredMessage): string {

@@ -46,6 +46,10 @@ or normalized errors:
 Runtime argument validation is strict. Unknown input keys are not ignored; they return `ok:false` with
 `error.category:"validation"` and a `fields[].path` entry naming the unknown key.
 
+For `semantic_search_messages` and vector/hybrid portions of `search_messages`, `before_id` and `after_id` are strict
+message windows. Candidate chunks may overlap the window for scoring, but returned chunk `messageIds`, hydrated
+`messages`, `startMessageId`/`endMessageId`, and text are trimmed to in-window messages only.
+
 `sync_history` uses explicit status values:
 
 ```json

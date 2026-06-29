@@ -328,7 +328,21 @@ Important operating rule:
   - Search never compares query vectors against chunks from another namespace.
   - Stats expose namespace enough for operators to understand what is indexed.
 
-- [ ] 9. Fix vector search range filters.
+- [x] 9. Fix vector search range filters.
+
+  Status 2026-06-29: Completed. Vector range filters now keep overlap-based chunk candidate scoring, but trim every
+  returned semantic/vector hit to the strict requested message window. Returned chunk `messageIds`, hydrated
+  `messages`, `startMessageId`, `endMessageId`, `messageCount`, and trimmed text exclude messages outside
+  `after_id` / `before_id`. Hybrid search receives the already-trimmed vector hits, so overlapping chunks cannot
+  reintroduce out-of-window messages into merged results. Tool docs now describe the strict window semantics.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/vector-rag.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm test`
+  - `npm run smoke:mcp`
+  - `npm run secret-scan`
 
   Problem:
   Vector `before_id`/`after_id` filtering selects chunks by overlap, then hydrates every member message. A chunk spanning `[1,2]` can return message `1` for `after_id:1`.
