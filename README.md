@@ -50,6 +50,7 @@ npm run status
 
 Status is `ok`, `degraded`, `critical`, or `unknown`. Alert on `critical` immediately, and investigate `degraded`
 when recent sync or daemon success lag is above the warning threshold shown in the JSON.
+Use `get_status` / `npm run status` as the first read for cache and health tasks; it does not connect to Telegram.
 
 SQLite uses WAL plus a busy timeout and bounded retry for write coordination, so the MCP server, sync daemon, and
 embedding indexer can share the same DB. Keep any custom/manual write transactions small so reads and other writers do

@@ -15,6 +15,10 @@ Default chat: `-1003179772905` (`Парилка228`). All tools accept optional 
 - `index_embeddings`: build local SQLite vector chunks from cached messages via the configured embeddings API.
 - `get_thread_context`: cached messages around a message ID. Includes `center_found`, requested range, returned count, and cache range/completeness metadata.
 
+Cache-only tools: `get_config`, `get_status`, `read_history`, `search_messages`, `semantic_search_messages`, and
+`get_thread_context`. Live-resolving tools may connect to Telegram: `resolve_chat`, `get_chat_info`, `sync_history`,
+`preview_message`, `send_message`, and `reply_to_message`.
+
 Cache metadata uses these `relation.completeness` values:
 
 - `empty_cache`: no cached rows exist for the chat.

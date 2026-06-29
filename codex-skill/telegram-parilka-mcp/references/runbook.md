@@ -126,10 +126,24 @@ Index a bounded batch of cached messages:
 
 ```bash
 cd /root/telegram-parilka-mcp
-npm run embed-once -- --limit-chunks 1000
+npm run embed-once -- --limit-chunks 1000 --estimate-only
+npm run embed-once -- --limit-chunks 1000 --confirm-estimate
 ```
 
+The estimate prints provider, model, dimensions, namespace, chat, estimated chunks/messages/chars, and budget flags
+without calling the embeddings API. Run the confirmed command only after reviewing that privacy/cost surface. On the
+first daemon indexing run, the daemon logs the estimate and skips API calls until a confirmed manual index exists.
+
 Search with `search_messages` for keyword/vector/hybrid results, or `semantic_search_messages` for vector-only chunks.
+
+## Cache-Only Vs Live-Resolving Tools
+
+Use cache-only tools first when inspecting state or answering from already synced data: `get_config`, `get_status`,
+`read_history`, `search_messages`, `semantic_search_messages`, and `get_thread_context`.
+
+These tools may connect to Telegram and should be used deliberately: `resolve_chat`, `get_chat_info`, `sync_history`,
+`preview_message`, `send_message`, and `reply_to_message`. Sending tools remain dry-run or approval-gated according to
+the safety config.
 
 ## Codex Config
 

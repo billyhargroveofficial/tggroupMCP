@@ -691,7 +691,25 @@ Important operating rule:
   - Every documented cache metadata branch is asserted by tests.
   - Empty results are never ambiguous for agents.
 
-- [ ] 18. Align skill docs and runbook with current tool behavior.
+- [x] 18. Align skill docs and runbook with current tool behavior.
+
+  Status 2026-06-29: Completed. The skill workflow now starts cache and health inspection with cache-only `get_status`,
+  uses `get_config` for configured defaults, and reserves live `resolve_chat` for exact target identity checks. The
+  runbook and tool map document cache-only versus live-resolving tools. Vector indexing examples are estimate-first
+  with an explicit `--confirm-estimate` follow-up, and the first-run privacy/cost estimate behavior is described. Stale
+  caller-owned `user_key` guidance is absent from the current safety/docs surface. The installed Codex skill at
+  `/root/.codex/skills/telegram-parilka-mcp` was synchronized from the repo copy after verification.
+
+  Verification 2026-06-29:
+
+  - `rg -n 'Call \`get_chat_info\`|user_key|npm run embed-once -- --limit-chunks 1000$|--confirm-estimate|cache-only|live-resolving' codex-skill/telegram-parilka-mcp README.md`
+  - `npm run check`
+  - `npm run build`
+  - `npm test`
+  - `npm run secret-scan`
+  - `npm run smoke:mcp`
+  - `npm run smoke:mcp:wrapper`
+  - `diff -qr /root/.codex/skills/telegram-parilka-mcp /root/telegram-parilka-mcp/codex-skill/telegram-parilka-mcp`
 
   Problem:
   Skill workflow still starts with live `get_chat_info` instead of cache-only `get_status`. Safety docs mention `user_key`, which is no longer exposed. Vector RAG runbook shows first-run indexing without the required confirmation flow.
