@@ -18,6 +18,7 @@
     "generate-session": "tsx src/generate-session.ts",
     "embed-once": "tsx src/embed-index.ts",
     "print-config": "tsx src/index.ts --print-config",
+    "validate-config": "tsx src/index.ts --validate-config",
     "sync-once": "tsx src/sync-daemon.ts --once",
     "sync-daemon": "tsx src/sync-daemon.ts",
     "start": "node dist/index.js"

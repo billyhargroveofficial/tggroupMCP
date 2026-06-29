@@ -153,6 +153,15 @@ Acceptance criteria:
 
 ### 5. Add central config validation
 
+Status 2026-06-29: Completed. Numeric env parsing now uses a central `NUMERIC_ENV_RULES` table with explicit integer min/max bounds for Telegram, send safety, sync, throttling, and embeddings settings. Floats, NaN, negatives, disallowed zero values, and too-large values fail during `loadConfig()` before daemon/server startup, with errors naming the env var and allowed range. Cross-field validation rejects `TELEGRAM_SYNC_BACKOFF_MAX_MS` below `TELEGRAM_SYNC_BACKOFF_INITIAL_MS`, and `npm run validate-config` exercises the same load path as startup.
+
+Verification 2026-06-29:
+
+- `npm test -- --test-reporter=spec`
+- `npm run check`
+- `npm run print-config`
+- `npm run validate-config`
+
 Problem:
 Numeric env parsing only checks finite numbers. Bad values can wedge the process, for example `TELEGRAM_EMBEDDINGS_API_BATCH_SIZE=0` creates an infinite loop and `TELEGRAM_GLOBAL_CONCURRENCY=0` leaves sends queued forever.
 

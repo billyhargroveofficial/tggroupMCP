@@ -10,6 +10,10 @@ import { TelegramTools } from "./tools.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  if (process.argv.includes("--validate-config")) {
+    console.log(stringify({ ok: true, config: redactedConfig(config) }));
+    return;
+  }
   if (process.argv.includes("--print-config")) {
     console.log(stringify(redactedConfig(config)));
     return;

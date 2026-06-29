@@ -6,6 +6,7 @@ import { z } from "zod";
 
 const DEFAULT_PARILKA_CHAT_ID = "-1003179772905";
 const INITIAL_ENV_KEYS = new Set(Object.keys(process.env));
+const INT32_MAX = 2_147_483_647;
 
 loadEnvFile("/root/.config/telegram-mcp/.env", false);
 loadEnvFile(resolve(process.cwd(), ".env"), true);
@@ -25,17 +26,68 @@ function loadEnvFile(path: string, preferOverLoadedFile: boolean): void {
   }
 }
 
-const intFromEnv = (name: string, fallback: number): number => {
+export type NumericEnvRule = {
+  fallback: number;
+  min: number;
+  max: number;
+};
+
+export const NUMERIC_ENV_RULES = {
+  TELEGRAM_API_ID: { fallback: 0, min: 0, max: INT32_MAX },
+  TELEGRAM_CONNECTION_RETRIES: { fallback: 5, min: 0, max: 100 },
+  TELEGRAM_MAX_SEND_CHARS: { fallback: 4096, min: 1, max: 35_000 },
+  TELEGRAM_LIVE_SEND_APPROVAL_TTL_MS: { fallback: 5 * 60_000, min: 1_000, max: 24 * 60 * 60_000 },
+  TELEGRAM_HISTORY_BATCH_SIZE: { fallback: 100, min: 1, max: 1_000 },
+  TELEGRAM_MAX_SYNC_LIMIT: { fallback: 500_000, min: 1, max: 1_000_000 },
+  TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC: { fallback: 10, min: 0, max: 24 * 60 * 60 },
+  TELEGRAM_HISTORY_WAIT_TIME_SEC: { fallback: 1, min: 0, max: 60 },
+  TELEGRAM_SYNC_INTERVAL_MS: { fallback: 60_000, min: 1_000, max: 24 * 60 * 60_000 },
+  TELEGRAM_SYNC_RECENT_LIMIT: { fallback: 300, min: 0, max: 1_000_000 },
+  TELEGRAM_SYNC_BACKFILL_LIMIT: { fallback: 1_000, min: 0, max: 1_000_000 },
+  TELEGRAM_SYNC_BACKOFF_INITIAL_MS: { fallback: 5_000, min: 1_000, max: 60 * 60_000 },
+  TELEGRAM_SYNC_BACKOFF_MAX_MS: { fallback: 5 * 60_000, min: 1_000, max: 24 * 60 * 60_000 },
+  TELEGRAM_EMBEDDINGS_DIMENSIONS: { fallback: 256, min: 1, max: 16_384 },
+  TELEGRAM_EMBEDDINGS_API_BATCH_SIZE: { fallback: 64, min: 1, max: 2_048 },
+  TELEGRAM_EMBEDDINGS_CHUNK_MESSAGES: { fallback: 12, min: 1, max: 1_000 },
+  TELEGRAM_EMBEDDINGS_CHUNK_MAX_CHARS: { fallback: 1600, min: 1, max: 200_000 },
+  TELEGRAM_EMBEDDINGS_TICK_CHUNK_LIMIT: { fallback: 100, min: 1, max: 100_000 },
+  TELEGRAM_EMBEDDINGS_SEARCH_LIMIT: { fallback: 12, min: 1, max: 1_000 },
+  TELEGRAM_DEDUPE_TTL_MS: { fallback: 10 * 60_000, min: 1_000, max: 30 * 24 * 60 * 60_000 },
+  TELEGRAM_USER_COOLDOWN_MS: { fallback: 20_000, min: 0, max: 24 * 60 * 60_000 },
+  TELEGRAM_MAX_PENDING_PER_USER_PER_CHAT: { fallback: 1, min: 1, max: 1_000 },
+  TELEGRAM_MAX_QUEUE_PER_CHAT: { fallback: 25, min: 1, max: 100_000 },
+  TELEGRAM_QUEUE_MAX_AGE_MS: { fallback: 2 * 60_000, min: 1_000, max: 24 * 60 * 60_000 },
+  TELEGRAM_GLOBAL_CONCURRENCY: { fallback: 2, min: 1, max: 1_000 },
+  TELEGRAM_MAX_RUNNING_PER_CHAT: { fallback: 1, min: 1, max: 1_000 },
+} as const satisfies Record<string, NumericEnvRule>;
+
+type NumericEnvName = keyof typeof NUMERIC_ENV_RULES;
+
+const intFromEnv = (name: NumericEnvName): number => {
+  const rule = NUMERIC_ENV_RULES[name];
+  validateInteger(name, rule.fallback, rule);
   const raw = process.env[name];
   if (raw == null || raw.trim() === "") {
-    return fallback;
+    return rule.fallback;
   }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`${name} must be a number`);
-  }
+  const parsed = parseInteger(name, raw.trim(), rule);
   return parsed;
 };
+
+function parseInteger(name: string, raw: string, rule: NumericEnvRule): number {
+  if (!/^-?\d+$/.test(raw)) {
+    throw new Error(`${name} must be an integer between ${rule.min} and ${rule.max}; got ${JSON.stringify(raw)}.`);
+  }
+  const parsed = Number(raw);
+  validateInteger(name, parsed, rule);
+  return parsed;
+}
+
+function validateInteger(name: string, value: number, rule: NumericEnvRule): void {
+  if (!Number.isSafeInteger(value) || value < rule.min || value > rule.max) {
+    throw new Error(`${name} must be an integer between ${rule.min} and ${rule.max}; got ${value}.`);
+  }
+}
 
 const boolFromEnv = (name: string, fallback: boolean): boolean => {
   const raw = process.env[name];
@@ -126,11 +178,11 @@ export function loadConfig(): AppConfig {
   const dbPath = expandPath(process.env.TELEGRAM_DB_PATH || "~/.telegram-parilka-mcp/messages.sqlite");
   const embeddingApiKey =
     process.env.TELEGRAM_EMBEDDINGS_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim() || "";
-  const embeddingDimensions = intFromEnv("TELEGRAM_EMBEDDINGS_DIMENSIONS", 256);
+  const embeddingDimensions = intFromEnv("TELEGRAM_EMBEDDINGS_DIMENSIONS");
 
   const config: AppConfig = {
     telegram: {
-      apiId: intFromEnv("TELEGRAM_API_ID", 0),
+      apiId: intFromEnv("TELEGRAM_API_ID"),
       apiHash: process.env.TELEGRAM_API_HASH?.trim() || "",
       session:
         process.env.TELEGRAM_SESSION?.trim() ||
@@ -142,7 +194,7 @@ export function loadConfig(): AppConfig {
       defaultChatId,
       allowedChatIds: allowed.length > 0 ? allowed : [defaultChatId],
       requireAllowlistedChat: boolFromEnv("TELEGRAM_REQUIRE_ALLOWLIST", true),
-      connectionRetries: intFromEnv("TELEGRAM_CONNECTION_RETRIES", 5),
+      connectionRetries: intFromEnv("TELEGRAM_CONNECTION_RETRIES"),
     },
     storage: {
       dbPath,
@@ -150,46 +202,55 @@ export function loadConfig(): AppConfig {
     safety: {
       sendEnabled: boolFromEnv("TELEGRAM_SEND_ENABLED", true),
       dryRunDefault: boolFromEnv("TELEGRAM_DRY_RUN_DEFAULT", false),
-      maxSendChars: intFromEnv("TELEGRAM_MAX_SEND_CHARS", 4096),
-      liveSendApprovalTtlMs: intFromEnv("TELEGRAM_LIVE_SEND_APPROVAL_TTL_MS", 5 * 60_000),
+      maxSendChars: intFromEnv("TELEGRAM_MAX_SEND_CHARS"),
+      liveSendApprovalTtlMs: intFromEnv("TELEGRAM_LIVE_SEND_APPROVAL_TTL_MS"),
       liveSendApprovalBypass: boolFromEnv("TELEGRAM_LIVE_SEND_APPROVAL_BYPASS", false),
     },
     sync: {
-      batchSize: intFromEnv("TELEGRAM_HISTORY_BATCH_SIZE", 100),
-      maxSyncLimit: intFromEnv("TELEGRAM_MAX_SYNC_LIMIT", 500_000),
-      floodWaitMaxSleepSec: intFromEnv("TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC", 10),
-      historyWaitTimeSec: intFromEnv("TELEGRAM_HISTORY_WAIT_TIME_SEC", 1),
-      intervalMs: intFromEnv("TELEGRAM_SYNC_INTERVAL_MS", 60_000),
-      recentLimit: intFromEnv("TELEGRAM_SYNC_RECENT_LIMIT", 300),
-      backfillLimit: intFromEnv("TELEGRAM_SYNC_BACKFILL_LIMIT", 1_000),
-      transientBackoffInitialMs: intFromEnv("TELEGRAM_SYNC_BACKOFF_INITIAL_MS", 5_000),
-      transientBackoffMaxMs: intFromEnv("TELEGRAM_SYNC_BACKOFF_MAX_MS", 5 * 60_000),
+      batchSize: intFromEnv("TELEGRAM_HISTORY_BATCH_SIZE"),
+      maxSyncLimit: intFromEnv("TELEGRAM_MAX_SYNC_LIMIT"),
+      floodWaitMaxSleepSec: intFromEnv("TELEGRAM_FLOOD_WAIT_MAX_SLEEP_SEC"),
+      historyWaitTimeSec: intFromEnv("TELEGRAM_HISTORY_WAIT_TIME_SEC"),
+      intervalMs: intFromEnv("TELEGRAM_SYNC_INTERVAL_MS"),
+      recentLimit: intFromEnv("TELEGRAM_SYNC_RECENT_LIMIT"),
+      backfillLimit: intFromEnv("TELEGRAM_SYNC_BACKFILL_LIMIT"),
+      transientBackoffInitialMs: intFromEnv("TELEGRAM_SYNC_BACKOFF_INITIAL_MS"),
+      transientBackoffMaxMs: intFromEnv("TELEGRAM_SYNC_BACKOFF_MAX_MS"),
     },
     embeddings: {
       enabled: boolFromEnv("TELEGRAM_EMBEDDINGS_ENABLED", false),
       apiKey: embeddingApiKey,
       baseUrl: process.env.TELEGRAM_EMBEDDINGS_BASE_URL?.trim() || "https://api.openai.com/v1",
       model: process.env.TELEGRAM_EMBEDDINGS_MODEL?.trim() || "text-embedding-3-small",
-      dimensions: embeddingDimensions > 0 ? embeddingDimensions : undefined,
-      apiBatchSize: intFromEnv("TELEGRAM_EMBEDDINGS_API_BATCH_SIZE", 64),
-      chunkMessages: intFromEnv("TELEGRAM_EMBEDDINGS_CHUNK_MESSAGES", 12),
-      chunkMaxChars: intFromEnv("TELEGRAM_EMBEDDINGS_CHUNK_MAX_CHARS", 1600),
-      tickChunkLimit: intFromEnv("TELEGRAM_EMBEDDINGS_TICK_CHUNK_LIMIT", 100),
-      searchLimit: intFromEnv("TELEGRAM_EMBEDDINGS_SEARCH_LIMIT", 12),
+      dimensions: embeddingDimensions,
+      apiBatchSize: intFromEnv("TELEGRAM_EMBEDDINGS_API_BATCH_SIZE"),
+      chunkMessages: intFromEnv("TELEGRAM_EMBEDDINGS_CHUNK_MESSAGES"),
+      chunkMaxChars: intFromEnv("TELEGRAM_EMBEDDINGS_CHUNK_MAX_CHARS"),
+      tickChunkLimit: intFromEnv("TELEGRAM_EMBEDDINGS_TICK_CHUNK_LIMIT"),
+      searchLimit: intFromEnv("TELEGRAM_EMBEDDINGS_SEARCH_LIMIT"),
     },
     throttle: {
-      dedupeTtlMs: intFromEnv("TELEGRAM_DEDUPE_TTL_MS", 10 * 60_000),
-      userCooldownMs: intFromEnv("TELEGRAM_USER_COOLDOWN_MS", 20_000),
-      maxPendingPerUserPerChat: intFromEnv("TELEGRAM_MAX_PENDING_PER_USER_PER_CHAT", 1),
-      maxQueuePerChat: intFromEnv("TELEGRAM_MAX_QUEUE_PER_CHAT", 25),
-      maxAgeMs: intFromEnv("TELEGRAM_QUEUE_MAX_AGE_MS", 2 * 60_000),
-      globalConcurrency: intFromEnv("TELEGRAM_GLOBAL_CONCURRENCY", 2),
-      maxRunningPerChat: intFromEnv("TELEGRAM_MAX_RUNNING_PER_CHAT", 1),
+      dedupeTtlMs: intFromEnv("TELEGRAM_DEDUPE_TTL_MS"),
+      userCooldownMs: intFromEnv("TELEGRAM_USER_COOLDOWN_MS"),
+      maxPendingPerUserPerChat: intFromEnv("TELEGRAM_MAX_PENDING_PER_USER_PER_CHAT"),
+      maxQueuePerChat: intFromEnv("TELEGRAM_MAX_QUEUE_PER_CHAT"),
+      maxAgeMs: intFromEnv("TELEGRAM_QUEUE_MAX_AGE_MS"),
+      globalConcurrency: intFromEnv("TELEGRAM_GLOBAL_CONCURRENCY"),
+      maxRunningPerChat: intFromEnv("TELEGRAM_MAX_RUNNING_PER_CHAT"),
     },
   };
 
+  validateConfig(config);
   mkdirSync(dirname(config.storage.dbPath), { recursive: true });
   return config;
+}
+
+function validateConfig(config: AppConfig): void {
+  if (config.sync.transientBackoffMaxMs < config.sync.transientBackoffInitialMs) {
+    throw new Error(
+      "TELEGRAM_SYNC_BACKOFF_MAX_MS must be greater than or equal to TELEGRAM_SYNC_BACKOFF_INITIAL_MS.",
+    );
+  }
 }
 
 export function redactedConfig(config: AppConfig): Record<string, unknown> {
