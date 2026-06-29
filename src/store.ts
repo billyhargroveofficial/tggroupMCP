@@ -6,7 +6,7 @@ import type { ChatInfo } from "./telegram-client.js";
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 6;
 const SQLITE_BUSY_RETRY_INITIAL_MS = 25;
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 export type StoredMessage = {
   id?: number;
@@ -27,6 +27,9 @@ export type SyncState = {
   oldestMessageId?: number;
   newestMessageId?: number;
   nextBackfillOffsetId?: number;
+  recentCatchupMinId?: number;
+  recentCatchupNextOffsetId?: number;
+  recentCatchupNewestId?: number;
   syncedCount: number;
   lastRecentSyncAt?: string;
   lastBackfillAt?: string;
@@ -439,6 +442,7 @@ export class MessageStore {
       syncedCount: number;
       mode?: "recent" | "backfill" | "manual";
       error?: string | null;
+      recentCatchup?: { minMessageId?: number; nextOffsetId: number; newestMessageId?: number } | null;
     },
   ): void {
     this.immediateTransaction("updateSyncState", () => {
@@ -485,6 +489,36 @@ export class MessageStore {
           state.mode ?? "manual",
           state.error ?? null,
         );
+      if (Object.prototype.hasOwnProperty.call(state, "recentCatchup")) {
+        if (state.recentCatchup == null) {
+          this.db
+            .prepare(
+              `UPDATE sync_state
+               SET recent_catchup_min_id = NULL,
+                   recent_catchup_next_offset_id = NULL,
+                   recent_catchup_newest_id = NULL,
+                   updated_at = datetime('now')
+               WHERE chat_id = ?`,
+            )
+            .run(chat.chatId);
+        } else {
+          this.db
+            .prepare(
+              `UPDATE sync_state
+               SET recent_catchup_min_id = ?,
+                   recent_catchup_next_offset_id = ?,
+                   recent_catchup_newest_id = ?,
+                   updated_at = datetime('now')
+               WHERE chat_id = ?`,
+            )
+            .run(
+              state.recentCatchup.minMessageId ?? null,
+              state.recentCatchup.nextOffsetId,
+              state.recentCatchup.newestMessageId ?? null,
+              chat.chatId,
+            );
+        }
+      }
     });
   }
 
@@ -1024,7 +1058,13 @@ export class MessageStore {
 
   finishHistoryJob(
     jobId: string,
-    result: { status: "done" | "failed" | "skipped"; batches: number; messagesSeen: number; messagesUpserted: number; error?: string },
+    result: {
+      status: "done" | "failed" | "skipped" | "catching_up";
+      batches: number;
+      messagesSeen: number;
+      messagesUpserted: number;
+      error?: string;
+    },
   ): void {
     this.writeWithRetry("finishHistoryJob", () => {
       this.db
@@ -1297,6 +1337,10 @@ export class MessageStore {
         this.applySendOutboxMigration();
         this.db.exec("PRAGMA user_version = 7");
       }
+      if (currentVersion < 8) {
+        this.applyRecentCatchupMigration();
+        this.db.exec("PRAGMA user_version = 8");
+      }
       this.validateSchema();
     });
   }
@@ -1339,6 +1383,9 @@ export class MessageStore {
         oldest_message_id INTEGER,
         newest_message_id INTEGER,
         next_backfill_offset_id INTEGER,
+        recent_catchup_min_id INTEGER,
+        recent_catchup_next_offset_id INTEGER,
+        recent_catchup_newest_id INTEGER,
         synced_count INTEGER NOT NULL DEFAULT 0,
         last_recent_sync_at TEXT,
         last_backfill_at TEXT,
@@ -1467,6 +1514,9 @@ export class MessageStore {
         ON chat_aliases(chat_id);
     `);
     this.ensureColumn("sync_state", "next_backfill_offset_id", "INTEGER");
+    this.ensureColumn("sync_state", "recent_catchup_min_id", "INTEGER");
+    this.ensureColumn("sync_state", "recent_catchup_next_offset_id", "INTEGER");
+    this.ensureColumn("sync_state", "recent_catchup_newest_id", "INTEGER");
     this.ensureColumn("sync_state", "last_recent_sync_at", "TEXT");
     this.ensureColumn("sync_state", "last_backfill_at", "TEXT");
     this.ensureColumn("sync_state", "backfill_exhausted_at", "TEXT");
@@ -1605,6 +1655,12 @@ export class MessageStore {
     `);
   }
 
+  private applyRecentCatchupMigration(): void {
+    this.ensureColumn("sync_state", "recent_catchup_min_id", "INTEGER");
+    this.ensureColumn("sync_state", "recent_catchup_next_offset_id", "INTEGER");
+    this.ensureColumn("sync_state", "recent_catchup_newest_id", "INTEGER");
+  }
+
   private ensureColumn(table: string, column: string, definition: string): void {
     const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[];
     if (!rows.some((row) => row.name === column)) {
@@ -1683,6 +1739,9 @@ export class MessageStore {
       "oldest_message_id",
       "newest_message_id",
       "next_backfill_offset_id",
+      "recent_catchup_min_id",
+      "recent_catchup_next_offset_id",
+      "recent_catchup_newest_id",
       "synced_count",
       "last_recent_sync_at",
       "last_backfill_at",
@@ -1853,6 +1912,10 @@ function rowToSyncState(row: Record<string, unknown>): SyncState {
     oldestMessageId: row.oldest_message_id == null ? undefined : Number(row.oldest_message_id),
     newestMessageId: row.newest_message_id == null ? undefined : Number(row.newest_message_id),
     nextBackfillOffsetId: row.next_backfill_offset_id == null ? undefined : Number(row.next_backfill_offset_id),
+    recentCatchupMinId: row.recent_catchup_min_id == null ? undefined : Number(row.recent_catchup_min_id),
+    recentCatchupNextOffsetId:
+      row.recent_catchup_next_offset_id == null ? undefined : Number(row.recent_catchup_next_offset_id),
+    recentCatchupNewestId: row.recent_catchup_newest_id == null ? undefined : Number(row.recent_catchup_newest_id),
     syncedCount: Number(row.synced_count ?? 0),
     lastRecentSyncAt: row.last_recent_sync_at == null ? undefined : String(row.last_recent_sync_at),
     lastBackfillAt: row.last_backfill_at == null ? undefined : String(row.last_backfill_at),

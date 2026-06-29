@@ -200,7 +200,27 @@ Important operating rule:
   - Daemon delay is at least the retry-after duration.
   - A send queue does not dispatch the next chat job before a known slowmode/flood not-before timestamp.
 
-- [ ] 6. Make large recent catch-up progress across ticks.
+- [x] 6. Make large recent catch-up progress across ticks.
+
+  Status 2026-06-29: Completed. Recent sync now persists a bounded catch-up cursor in `sync_state`
+  (`recent_catchup_min_id`, `recent_catchup_next_offset_id`, `recent_catchup_newest_id`) when it exhausts
+  `TELEGRAM_MAX_SYNC_LIMIT` before proving contiguity back to the previous high-water mark. Follow-up ticks resume
+  from the saved offset instead of refetching the same newest pages. The confirmed `newest_message_id` high-water mark
+  is advanced only after the catch-up reaches the old baseline, preserving contiguous-safety guarantees. `sync_history`
+  can return `status:"catching_up"`, and `get_status` exposes `sync.recentCatchup.status:"catching_up"` while a cursor
+  is active. Schema version is now 8; existing DBs receive the nullable catch-up columns through migration.
+
+  Verification 2026-06-29:
+
+  - `node --test --import tsx tests/sync-engine.test.ts --test-reporter=spec`
+  - `node --test --import tsx tests/store-migrations.test.ts --test-reporter=spec`
+  - `node --test --import tsx tests/tools-response.test.ts --test-reporter=spec`
+  - `npm run check`
+  - `npm run status`
+  - live DB schema probe: `PRAGMA user_version` returned `8`; `sync_state` includes all three `recent_catchup_*` columns
+  - `npm test`
+  - `npm run smoke:mcp`
+  - `npm run secret-scan`
 
   Problem:
   Recent sync keeps the contiguous high-water mark safe, but if the backlog exceeds `TELEGRAM_MAX_SYNC_LIMIT`, it can flush rows then throw before advancing state. The next tick may refetch the same pages forever.

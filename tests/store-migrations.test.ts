@@ -31,11 +31,11 @@ test("old fixture DB migrates once and rebuilds FTS for historical rows", (t) =>
 
   const store = new MessageStore(dbPath);
 
-  assert.equal(store.getSchemaVersion(), 7);
+  assert.equal(store.getSchemaVersion(), 8);
   assert.equal(store.search({ chatId: "-1001", query: "historical", limit: 10 }).length, 1);
 
   const reopened = new MessageStore(dbPath);
-  assert.equal(reopened.getSchemaVersion(), 7);
+  assert.equal(reopened.getSchemaVersion(), 8);
   assert.equal(reopened.search({ chatId: "-1001", query: "searchable", limit: 10 })[0]?.messageId, 1);
 });
 
@@ -157,9 +157,23 @@ test("version 5 fixture without send tables migrates send audit schema", (t) => 
 
   const store = new MessageStore(dbPath);
 
-  assert.equal(store.getSchemaVersion(), 7);
+  assert.equal(store.getSchemaVersion(), 8);
   assert.equal(store.search({ chatId: "-1001", query: "preexisting", limit: 10 })[0]?.messageId, 1);
   assert.equal(store.countMessages("-1001"), 1);
+  store.updateSyncState(
+    { chatId: "-1001", requested: "-1001", kind: "Fake" },
+    {
+      syncedCount: store.countMessages("-1001"),
+      mode: "recent",
+      error: null,
+      recentCatchup: {
+        minMessageId: 1,
+        nextOffsetId: 10,
+        newestMessageId: 20,
+      },
+    },
+  );
+  assert.equal(store.getSyncState("-1001")?.recentCatchupNextOffsetId, 10);
   const reservation = store.reserveSend({
     outboxId: "send_fixture",
     dedupeKey: "dedupe/fixture",

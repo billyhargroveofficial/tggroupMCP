@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { fail, ok, ToolError } from "./errors.js";
 import { stringify } from "./json.js";
-import { MessageStore, type ChatCacheStatus } from "./store.js";
+import { MessageStore, type ChatCacheStatus, type SyncState } from "./store.js";
 import { type ChatInfo, TelegramService } from "./telegram-client.js";
 import { SendThrottler } from "./throttler.js";
 import { HistorySyncer } from "./sync-engine.js";
@@ -292,6 +292,7 @@ export class TelegramTools {
         lastError: status.syncState?.lastError,
         backfillExhausted: Boolean(status.syncState?.backfillExhaustedAt),
         backfillExhaustedAt: status.syncState?.backfillExhaustedAt,
+        recentCatchup: recentCatchupSummary(status.syncState),
         state: status.syncState,
       },
       daemon: status.daemonStatus,
@@ -854,13 +855,16 @@ function enumProp(values: string[], description: string): Record<string, unknown
   return { type: "string", enum: values, description };
 }
 
-function syncOnceStatus(result: SyncOnceResult): "done" | "failed" | "partial" | "skipped" {
+function syncOnceStatus(result: SyncOnceResult): "done" | "failed" | "partial" | "skipped" | "catching_up" {
   const statuses = [result.recent?.status, result.backfill?.status].filter((status): status is SyncResult["status"] => status != null);
   if (statuses.length === 0) {
     return "skipped";
   }
   if (statuses.every((status) => status === "done")) {
     return "done";
+  }
+  if (statuses.every((status) => status === "catching_up")) {
+    return "catching_up";
   }
   if (statuses.every((status) => status === "skipped")) {
     return "skipped";
@@ -869,6 +873,18 @@ function syncOnceStatus(result: SyncOnceResult): "done" | "failed" | "partial" |
     return "failed";
   }
   return "partial";
+}
+
+function recentCatchupSummary(state: SyncState | null | undefined): Record<string, unknown> | null {
+  if (!state?.recentCatchupNextOffsetId) {
+    return null;
+  }
+  return {
+    status: "catching_up",
+    minMessageId: state.recentCatchupMinId,
+    nextOffsetId: state.recentCatchupNextOffsetId,
+    newestMessageId: state.recentCatchupNewestId,
+  };
 }
 
 type HealthIssue = {

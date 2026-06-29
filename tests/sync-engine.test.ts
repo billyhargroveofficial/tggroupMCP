@@ -137,6 +137,70 @@ test("recent sync catches up all pages above the previous newest id", async () =
   );
 });
 
+test("large recent catch-up progresses across ticks before advancing high-water", async () => {
+  const store = seededStore(1000);
+  const telegram = new FakeTelegram(range(1001, 1600));
+  const syncer = new HistorySyncer(config({ maxSyncLimit: 250 }), telegram as unknown as TelegramService, store);
+
+  const first = await syncer.syncDirection({
+    mode: "recent",
+    limit: 300,
+    batchSize: 50,
+  });
+
+  assert.equal(first.status, "catching_up");
+  assert.equal(first.fetched, 250);
+  assert.equal(first.nextOffsetId, 1351);
+  assert.equal(first.catchup?.status, "catching_up");
+  assert.equal(first.catchup?.nextOffsetId, 1351);
+  assert.equal(first.catchup?.newestMessageId, 1600);
+  let state = store.getSyncState(CHAT.chatId);
+  assert.equal(state?.newestMessageId, 1000);
+  assert.equal(state?.recentCatchupMinId, 1000);
+  assert.equal(state?.recentCatchupNextOffsetId, 1351);
+  assert.equal(state?.recentCatchupNewestId, 1600);
+  assert.equal(store.countMessages(CHAT.chatId), 251);
+
+  const second = await syncer.syncDirection({
+    mode: "recent",
+    limit: 300,
+    batchSize: 50,
+  });
+
+  assert.equal(second.status, "catching_up");
+  assert.equal(second.fetched, 250);
+  assert.equal(second.nextOffsetId, 1101);
+  state = store.getSyncState(CHAT.chatId);
+  assert.equal(state?.newestMessageId, 1000);
+  assert.equal(state?.recentCatchupNextOffsetId, 1101);
+  assert.equal(store.countMessages(CHAT.chatId), 501);
+
+  const third = await syncer.syncDirection({
+    mode: "recent",
+    limit: 300,
+    batchSize: 50,
+  });
+
+  assert.equal(third.status, "done");
+  assert.equal(third.fetched, 100);
+  assert.equal(third.newestMessageId, 1600);
+  assert.equal(third.catchup?.status, "complete");
+  state = store.getSyncState(CHAT.chatId);
+  assert.equal(state?.newestMessageId, 1600);
+  assert.equal(state?.recentCatchupMinId, undefined);
+  assert.equal(state?.recentCatchupNextOffsetId, undefined);
+  assert.equal(state?.recentCatchupNewestId, undefined);
+  assert.equal(store.countMessages(CHAT.chatId), 601);
+  assert.deepEqual(
+    telegram.requests.map((request) => request.offsetId ?? 0),
+    [0, 1351, 1101],
+  );
+  assert.deepEqual(
+    store.getHistory({ chatId: CHAT.chatId, afterId: 1000, limit: 700, order: "asc" }).map((message) => message.messageId),
+    range(1001, 1600),
+  );
+});
+
 test("history operation watchdog fails a stuck iterator and closes it", async () => {
   const store = seededStore(1000);
   const telegram = new HangingTelegram();

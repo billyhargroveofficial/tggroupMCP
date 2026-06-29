@@ -86,6 +86,11 @@ test("get_status reports cache health without Telegram network calls", async () 
     syncedCount: 1,
     mode: "recent",
     error: "transient sync issue",
+    recentCatchup: {
+      minMessageId: 42,
+      nextOffsetId: 100,
+      newestMessageId: 150,
+    },
   });
   store.setBackfillExhausted(CHAT, true);
   store.recordDaemonTickStarted();
@@ -101,6 +106,9 @@ test("get_status reports cache health without Telegram network calls", async () 
   assert.equal((result.cache as { oldestMessageId: number }).oldestMessageId, 42);
   assert.equal((result.sync as { backfillExhausted: boolean }).backfillExhausted, true);
   assert.equal((result.sync as { lastError?: string }).lastError, "transient sync issue");
+  const recentCatchup = (result.sync as { recentCatchup?: { status: string; nextOffsetId: number } }).recentCatchup;
+  assert.equal(recentCatchup?.status, "catching_up");
+  assert.equal(recentCatchup?.nextOffsetId, 100);
   assert.equal((result.daemon as { lastError?: string }).lastError, "rate_limit: FLOOD_WAIT_30");
   assert.equal(Array.isArray((result.embeddings as { coverage?: unknown }).coverage), true);
 });

@@ -7,7 +7,7 @@ export type SyncDirection = "recent" | "backfill";
 
 export type SyncResult = {
   mode: SyncDirection;
-  status: "done" | "failed" | "skipped";
+  status: "done" | "failed" | "skipped" | "catching_up";
   chat: {
     chatId: string;
     title?: string;
@@ -25,6 +25,12 @@ export type SyncResult = {
     checked: number;
     refreshed: number;
     deleted: number;
+  };
+  catchup?: {
+    status: "catching_up" | "complete";
+    minMessageId?: number;
+    nextOffsetId?: number;
+    newestMessageId?: number;
   };
   error?: ReturnType<typeof normalizeError>;
 };
@@ -122,9 +128,23 @@ export class HistorySyncer {
     const backfillOffsets = [currentState?.nextBackfillOffsetId, currentState?.oldestMessageId].filter(
       (value): value is number => value != null && value > 0,
     );
+    const shouldUseRecentCatchup = params.mode === "recent" && params.offsetId == null;
+    const activeRecentCatchup =
+      shouldUseRecentCatchup && currentState?.recentCatchupNextOffsetId != null
+        ? {
+            minMessageId: currentState.recentCatchupMinId ?? currentState.newestMessageId,
+            nextOffsetId: currentState.recentCatchupNextOffsetId,
+            newestMessageId: currentState.recentCatchupNewestId,
+          }
+        : undefined;
     let offsetId =
-      params.offsetId ?? (params.mode === "backfill" && backfillOffsets.length > 0 ? Math.min(...backfillOffsets) : 0);
-    const minId = params.mode === "recent" ? currentState?.newestMessageId : undefined;
+      params.offsetId ??
+      (params.mode === "recent"
+        ? (activeRecentCatchup?.nextOffsetId ?? 0)
+        : params.mode === "backfill" && backfillOffsets.length > 0
+          ? Math.min(...backfillOffsets)
+          : 0);
+    const minId = params.mode === "recent" ? (activeRecentCatchup?.minMessageId ?? currentState?.newestMessageId) : undefined;
     const hasManualOffset = params.mode === "backfill" && params.offsetId != null;
     const shouldAdvanceBackfillPointer = params.mode === "backfill" && (params.commitCursor ?? !hasManualOffset);
     if (hasManualOffset && params.commitCursor) {
@@ -144,6 +164,8 @@ export class HistorySyncer {
     let newestMessageId: number | undefined;
     let oldestMessageId: number | undefined;
     let reconciliation: SyncResult["reconciliation"];
+    let catchupNewestMessageId = activeRecentCatchup?.newestMessageId;
+    let catchupNextOffsetId: number | undefined;
     let rows: StoredMessage[] = [];
     const seen = new Set<string>();
 
@@ -161,10 +183,16 @@ export class HistorySyncer {
         if (params.mode === "recent") {
           let pageOffsetId = offsetId;
           while (true) {
+            const remainingBudget = Math.max(0, this.config.sync.maxSyncLimit - fetched);
+            if (remainingBudget <= 0) {
+              catchupNextOffsetId = pageOffsetId > 0 ? pageOffsetId : undefined;
+              break;
+            }
+            const pageLimit = Math.min(target, remainingBudget);
             const stream = await withOperationTimeout(
               this.telegram.iterateMessages({
                 chat: chat.chatId,
-                limit: target,
+                limit: pageLimit,
                 offsetId: pageOffsetId,
                 minId,
                 waitTime: this.config.sync.historyWaitTimeSec,
@@ -196,6 +224,8 @@ export class HistorySyncer {
 
               oldestMessageId = oldestMessageId == null ? row.messageId : Math.min(oldestMessageId, row.messageId);
               newestMessageId = newestMessageId == null ? row.messageId : Math.max(newestMessageId, row.messageId);
+              catchupNewestMessageId =
+                catchupNewestMessageId == null ? row.messageId : Math.max(catchupNewestMessageId, row.messageId);
               pageOldestMessageId =
                 pageOldestMessageId == null ? row.messageId : Math.min(pageOldestMessageId, row.messageId);
 
@@ -205,16 +235,16 @@ export class HistorySyncer {
             }
             flushRows();
 
-            if (pageFetched < target || pageOldestMessageId == null) {
+            if (pageFetched < pageLimit || pageOldestMessageId == null) {
               break;
             }
             if (fetched >= this.config.sync.maxSyncLimit) {
-              throw new Error(
-                "Recent sync reached TELEGRAM_MAX_SYNC_LIMIT before confirming contiguous catch-up; state was not advanced.",
-              );
+              catchupNextOffsetId = pageOldestMessageId;
+              break;
             }
             pageOffsetId = pageOldestMessageId;
           }
+          offsetId = catchupNextOffsetId ?? pageOffsetId;
         } else {
           const stream = await withOperationTimeout(
             this.telegram.iterateMessages({
@@ -261,14 +291,44 @@ export class HistorySyncer {
         offsetId = oldestMessageId;
       }
       const cachedCount = this.store.countMessages(chat.chatId);
+      const status: SyncResult["status"] = params.mode === "recent" && catchupNextOffsetId != null ? "catching_up" : "done";
+      const committedNewestMessageId =
+        params.mode === "recent" && status === "done" ? (catchupNewestMessageId ?? newestMessageId) : newestMessageId;
+      const pendingRecentCatchup =
+        status === "catching_up" && catchupNextOffsetId != null
+          ? {
+              minMessageId: minId,
+              nextOffsetId: catchupNextOffsetId,
+              newestMessageId: catchupNewestMessageId,
+            }
+          : undefined;
+      const catchup =
+        params.mode === "recent" && shouldUseRecentCatchup
+          ? status === "catching_up"
+            ? { status: "catching_up" as const, ...pendingRecentCatchup }
+            : {
+                status: "complete" as const,
+                minMessageId: minId,
+                newestMessageId: committedNewestMessageId,
+              }
+          : undefined;
 
       this.store.updateSyncState(chat, {
         oldestMessageId: shouldAdvanceBackfillPointer || params.mode === "recent" ? oldestMessageId : undefined,
-        newestMessageId: shouldAdvanceBackfillPointer || params.mode === "recent" ? newestMessageId : undefined,
+        newestMessageId:
+          shouldAdvanceBackfillPointer || (params.mode === "recent" && status === "done")
+            ? committedNewestMessageId
+            : undefined,
         nextBackfillOffsetId: shouldAdvanceBackfillPointer && offsetId > 0 ? offsetId : undefined,
         syncedCount: cachedCount,
         mode: shouldAdvanceBackfillPointer || params.mode === "recent" ? params.mode : "manual",
         error: null,
+        recentCatchup:
+          params.mode === "recent" && shouldUseRecentCatchup
+            ? status === "catching_up"
+              ? pendingRecentCatchup
+              : null
+            : undefined,
       });
       if (params.mode === "backfill") {
         this.store.setBackfillExhausted(chat, fetched === 0);
@@ -277,7 +337,7 @@ export class HistorySyncer {
         reconciliation = await this.reconcileRecentWindow(chat, Math.max(1, Math.min(target, this.config.sync.recentLimit)));
       }
       this.store.finishHistoryJob(jobId, {
-        status: "done",
+        status,
         batches,
         messagesSeen: fetched,
         messagesUpserted: saved,
@@ -285,7 +345,7 @@ export class HistorySyncer {
 
       return {
         mode: params.mode,
-        status: "done",
+        status,
         chat: { chatId: chat.chatId, title: chat.title },
         jobId,
         requested: target,
@@ -294,8 +354,9 @@ export class HistorySyncer {
         batches,
         nextOffsetId: offsetId,
         oldestMessageId,
-        newestMessageId,
+        newestMessageId: committedNewestMessageId,
         reconciliation,
+        catchup,
       };
     } catch (error) {
       const normalized = normalizeError(error);
